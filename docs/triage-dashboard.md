@@ -5,7 +5,9 @@ Read when changing the read-only ClawSweeper advisory-label triage surface.
 The triage dashboard is a maintainer visibility surface for open issues. It
 does not mutate GitHub issues, project items, labels, comments, closes, or
 repair state. It reads GitHub Search results server-side, caches a short-lived
-snapshot, and renders views from labels that ClawSweeper already applies.
+snapshot, and renders views from labels that ClawSweeper already applies. If a
+refresh is temporarily rate-limited by GitHub, the API keeps serving the last
+good stale snapshot when one is available.
 
 ## Routes
 
@@ -33,8 +35,14 @@ The focused views are derived from fixed high-signal label combinations:
 | Product or security     | `clawsweeper:needs-product-decision` or `clawsweeper:needs-security-review` |
 | Needs live repro        | `clawsweeper:needs-live-repro`                                              |
 
-Each view stores the GitHub query, total count, and the newest matching issues
-up to `TRIAGE_ITEMS_PER_VIEW`.
+The API loads the broad ClawSweeper-labelled issue snapshot once per repository
+and derives the focused views from that loaded snapshot. This keeps the page
+within GitHub Search rate limits instead of firing one Search request for every
+tab. The broad snapshot loads up to `TRIAGE_ITEMS_PER_VIEW`; the default is 500,
+with an upper bound of 1,000 because GitHub Search only exposes the first 1,000
+results for a query. The default is intentionally high enough to cover the
+current ClawSweeper-labelled backlog, so browser-side filtering by older issue
+numbers or assignees works for the existing view data.
 
 The issue table includes assignees and, for issues carrying
 `clawsweeper:linked-pr-open`, linked pull requests from GitHub timeline data. It
@@ -51,6 +59,10 @@ The table is browser-local state only. Issue titles wrap so maintainers can
 read more context without opening GitHub, and each column can be resized from
 the header edge. Column widths are saved in `localStorage`; they do not affect
 other users or any GitHub state.
+
+The UI displays the loaded-row count and the per-view snapshot limit so users
+can tell when filtering is operating on a bounded local result set rather than
+an unbounded GitHub search.
 
 ## Local Development
 

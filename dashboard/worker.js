@@ -20,7 +20,9 @@ const SUPPORT_WORKFLOW_NAMES = new Set([
   "spam comment intake",
 ]);
 const TRIAGE_CACHE_TTL_SECONDS = 120;
-const TRIAGE_ITEMS_PER_VIEW = 75;
+const DEFAULT_TRIAGE_ITEMS_PER_VIEW = 500;
+const MAX_TRIAGE_ITEMS_PER_VIEW = 1000;
+const TRIAGE_SEARCH_PAGE_SIZE = 100;
 const TRIAGE_LINKED_PR_ITEM_LIMIT = 240;
 const TRIAGE_LINKED_PR_BATCH_SIZE = 25;
 const TRIAGE_LABEL_PREFIX = "clawsweeper:";
@@ -155,23 +157,40 @@ function statusCacheRequest(request, bucket) {
 
 async function triageJson(request, env, ctx) {
   const ttl = numberFrom(env.TRIAGE_CACHE_TTL_SECONDS, TRIAGE_CACHE_TTL_SECONDS);
+  const staleTtl = numberFrom(env.STALE_CACHE_TTL_SECONDS, STALE_CACHE_TTL_SECONDS);
   const cache = caches.default;
-  const cached = await cache.match(triageCacheRequest(request));
+  const cached = await cache.match(triageCacheRequest(request, "fresh"));
   if (cached) return cors(new Response(cached.body, cached));
 
   const snapshot = await triageSnapshot(env);
   const body = JSON.stringify(snapshot, null, 2);
-  ctx?.waitUntil?.(
-    cache.put(
-      triageCacheRequest(request),
-      new Response(body, {
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": `public, max-age=${ttl}`,
-        },
-      }),
-    ),
-  );
+  const looksEmpty = triageSnapshotLooksEmpty(snapshot);
+  if (looksEmpty) {
+    const stale = await cache.match(triageCacheRequest(request, "stale"));
+    if (stale) return cors(new Response(stale.body, stale));
+  }
+  if (!looksEmpty) {
+    const responseHeaders = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": `public, max-age=${ttl}`,
+    };
+    const staleResponseHeaders = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": `public, max-age=${staleTtl}`,
+    };
+    ctx?.waitUntil?.(
+      Promise.all([
+        cache.put(
+          triageCacheRequest(request, "fresh"),
+          new Response(body, { headers: responseHeaders }),
+        ),
+        cache.put(
+          triageCacheRequest(request, "stale"),
+          new Response(body, { headers: staleResponseHeaders }),
+        ),
+      ]),
+    );
+  }
   return cors(
     new Response(body, {
       headers: {
@@ -182,8 +201,17 @@ async function triageJson(request, env, ctx) {
   );
 }
 
-function triageCacheRequest(request) {
-  return new Request(new URL("/api/triage-cache/fresh", request.url).toString(), {
+function triageSnapshotLooksEmpty(snapshot) {
+  const hasErrors = Boolean(snapshot.diagnostics?.errors?.length);
+  const loadedItems = (snapshot.views || []).reduce(
+    (total, view) => total + (Array.isArray(view.items) ? view.items.length : 0),
+    0,
+  );
+  return !loadedItems && hasErrors;
+}
+
+function triageCacheRequest(request, bucket) {
+  return new Request(new URL(`/api/triage-cache/v2/${bucket}`, request.url).toString(), {
     method: "GET",
   });
 }
@@ -315,10 +343,11 @@ async function triageSnapshot(env) {
   const generatedAt = new Date().toISOString();
   const errors = [];
   const repos = triageTargetRepos(env);
+  const itemLimit = triageItemsPerView(env);
   const repoSnapshots = await Promise.all(
-    repos.map((repo) => triageSnapshotForRepo(env, repo, errors)),
+    repos.map((repo) => triageSnapshotForRepo(env, repo, errors, itemLimit)),
   );
-  const views = mergeTriageRepoViews(repoSnapshots);
+  const views = mergeTriageRepoViews(repoSnapshots, itemLimit);
   await attachTriageLinkedPullRequests(env, views, errors);
   const counts = Object.fromEntries(views.map((view) => [view.id, view.total_count]));
   return {
@@ -327,7 +356,7 @@ async function triageSnapshot(env) {
     source: {
       target_repositories: repos,
       label_prefix: TRIAGE_LABEL_PREFIX,
-      item_limit_per_view: TRIAGE_ITEMS_PER_VIEW,
+      item_limit_per_view: itemLimit,
     },
     counts,
     views,
@@ -506,15 +535,26 @@ function normalizePullRequestState(state) {
   return "unknown";
 }
 
-async function triageSnapshotForRepo(env, repo, errors) {
+async function triageSnapshotForRepo(env, repo, errors, itemLimit) {
   const repoLabels = await repoClawsweeperLabels(env, repo).catch((error) => {
     errors.push(`${repo} labels: ${error.message}`);
     return [];
   });
   const discoveredLabels = repoLabels.map((label) => label.name);
-  const views = await Promise.all(
-    TRIAGE_VIEWS.map((view) => triageViewForRepo(env, repo, view, discoveredLabels, errors)),
+  const rootView = await triageViewForRepo(
+    env,
+    repo,
+    TRIAGE_VIEWS[0],
+    discoveredLabels,
+    errors,
+    itemLimit,
   );
+  const views = [
+    rootView,
+    ...TRIAGE_VIEWS.slice(1).map((view) =>
+      triageViewFromItems(repo, view, discoveredLabels, rootView.items, itemLimit),
+    ),
+  ];
   return {
     repository: repo,
     labels: repoLabels,
@@ -522,7 +562,71 @@ async function triageSnapshotForRepo(env, repo, errors) {
   };
 }
 
-function mergeTriageRepoViews(repoSnapshots) {
+function triageViewFromItems(repo, definition, discoveredLabels, sourceItems, itemLimit) {
+  const query = triageSearchQuery(repo, definition, discoveredLabels);
+  if (!query) {
+    return {
+      id: definition.id,
+      repository: repo,
+      title: definition.title,
+      description: definition.description,
+      query: null,
+      github_url: null,
+      total_count: 0,
+      items: [],
+    };
+  }
+  const items = (sourceItems || [])
+    .filter((item) => triageItemMatchesView(item, definition, discoveredLabels))
+    .sort(newestTriageCreatedFirst)
+    .slice(0, itemLimit);
+  return {
+    id: definition.id,
+    repository: repo,
+    title: definition.title,
+    description: definition.description,
+    query,
+    github_url: githubSearchUrl(query),
+    total_count: items.length,
+    items,
+  };
+}
+
+function triageItemMatchesView(item, definition, discoveredLabels) {
+  const labels = new Set((item.labels || []).map((label) => label.name.toLowerCase()));
+  const available = new Set(discoveredLabels.map((label) => label.toLowerCase()));
+  const allLabels = (definition.allLabels || []).filter((label) =>
+    available.has(label.toLowerCase()),
+  );
+  const withoutLabels = (definition.withoutLabels || []).filter((label) =>
+    available.has(label.toLowerCase()),
+  );
+  let anyLabels = [];
+  if (definition.anyLabels === "discovered") {
+    anyLabels = discoveredLabels;
+  } else {
+    anyLabels = (definition.anyLabels || []).filter((label) => available.has(label.toLowerCase()));
+  }
+  if ((definition.allLabels || []).length && allLabels.length !== definition.allLabels.length) {
+    return false;
+  }
+  if (definition.anyLabels && anyLabels.length === 0) return false;
+  if (allLabels.some((label) => !labels.has(label.toLowerCase()))) return false;
+  if (withoutLabels.some((label) => labels.has(label.toLowerCase()))) return false;
+  if (anyLabels.length && !anyLabels.some((label) => labels.has(label.toLowerCase()))) {
+    return false;
+  }
+  return true;
+}
+
+function triageItemsPerView(env) {
+  return Math.min(
+    MAX_TRIAGE_ITEMS_PER_VIEW,
+    Math.max(1, numberFrom(env.TRIAGE_ITEMS_PER_VIEW, DEFAULT_TRIAGE_ITEMS_PER_VIEW)),
+  );
+}
+
+function mergeTriageRepoViews(repoSnapshots, itemLimit) {
   return TRIAGE_VIEWS.map((definition) => {
     const repoViews = repoSnapshots.map((repo) =>
       repo.views.find((view) => view.id === definition.id),
@@ -530,7 +634,7 @@ function mergeTriageRepoViews(repoSnapshots) {
     const items = repoViews
       .flatMap((view) => view?.items || [])
       .sort(newestTriageCreatedFirst)
-      .slice(0, TRIAGE_ITEMS_PER_VIEW);
+      .slice(0, itemLimit);
     const totalCount = repoViews.reduce((total, view) => total + (view?.total_count || 0), 0);
     const combinedQuery = combinedTriageSearchQuery(repoSnapshots, definition, repoViews);
     return {
@@ -571,7 +675,7 @@ function combinedTriageSearchQuery(repoSnapshots, definition, repoViews) {
   return parts.join(" ");
 }
 
-async function triageViewForRepo(env, repo, definition, discoveredLabels, errors) {
+async function triageViewForRepo(env, repo, definition, discoveredLabels, errors, itemLimit) {
   const query = triageSearchQuery(repo, definition, discoveredLabels);
   if (!query) {
     return {
@@ -585,7 +689,7 @@ async function triageViewForRepo(env, repo, definition, discoveredLabels, errors
       items: [],
     };
   }
-  const search = await githubIssueSearch(env, query, TRIAGE_ITEMS_PER_VIEW).catch((error) => {
+  const search = await githubIssueSearch(env, query, itemLimit).catch((error) => {
     errors.push(`${repo} ${definition.id}: ${error.message}`);
     return { total_count: 0, items: [] };
   });
@@ -661,9 +765,29 @@ async function repoClawsweeperLabels(env, repo) {
 }
 
 async function githubIssueSearch(env, query, perPage) {
+  const limit = Math.min(MAX_TRIAGE_ITEMS_PER_VIEW, Math.max(1, perPage));
+  const pageSize = Math.min(TRIAGE_SEARCH_PAGE_SIZE, limit);
+  const firstPage = await githubIssueSearchPage(env, query, pageSize, 1);
+  const totalCount = Number(firstPage?.total_count || 0);
+  const items = Array.isArray(firstPage?.items) ? [...firstPage.items] : [];
+  const wantedItems = Math.min(limit, totalCount || items.length);
+  const pageCount = Math.ceil(wantedItems / pageSize);
+  for (let page = 2; page <= pageCount; page += 1) {
+    const nextPage = await githubIssueSearchPage(env, query, pageSize, page);
+    if (!Array.isArray(nextPage?.items) || nextPage.items.length === 0) break;
+    items.push(...nextPage.items);
+  }
+  return {
+    ...firstPage,
+    total_count: totalCount,
+    items: items.slice(0, limit),
+  };
+}
+
+async function githubIssueSearchPage(env, query, perPage, page) {
   return githubJson(
     env,
-    `/search/issues?q=${encodeURIComponent(query)}&per_page=${Math.max(1, Math.min(100, perPage))}&sort=created&order=desc`,
+    `/search/issues?q=${encodeURIComponent(query)}&per_page=${perPage}&page=${page}&sort=created&order=desc`,
   );
 }
 
@@ -1549,13 +1673,13 @@ select:focus,
   font-weight: 600;
 }
 .table-wrap {
-  overflow: auto;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--panel);
 }
 table {
-  min-width: 100%;
+  width: 100%;
   table-layout: fixed;
   border-collapse: collapse;
 }
@@ -1600,7 +1724,8 @@ tr:last-child td { border-bottom: 0; }
   color: var(--text);
   font-size: 11px;
   line-height: 1.25;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -1627,7 +1752,8 @@ tr:last-child td { border-bottom: 0; }
   color: var(--text);
   font-size: 11px;
   line-height: 1.25;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .pr-chip {
   display: inline-flex;
@@ -1641,7 +1767,8 @@ tr:last-child td { border-bottom: 0; }
   color: var(--text);
   font-size: 11px;
   line-height: 1.25;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .pr-chip.open { border-color: rgba(78, 216, 145, 0.45); color: var(--green); }
 .pr-chip.merged { border-color: rgba(185, 156, 255, 0.45); color: var(--violet); }
@@ -1807,8 +1934,12 @@ function saveColumnWidths() {
 function tableWidth() {
   return COLUMN_ORDER.reduce((total, key) => total + columnWidths[key], 0);
 }
+function columnPercent(key) {
+  const total = Math.max(1, tableWidth());
+  return ((columnWidths[key] / total) * 100).toFixed(3) + "%";
+}
 function colgroupHtml() {
-  return COLUMN_ORDER.map(key => '<col data-col="' + esc(key) + '" style="width:' + esc(columnWidths[key]) + 'px">').join("");
+  return COLUMN_ORDER.map(key => '<col data-col="' + esc(key) + '" style="width:' + esc(columnPercent(key)) + '">').join("");
 }
 function headerCell(key) {
   const label = COLUMN_LABELS[key] || key;
@@ -1819,10 +1950,10 @@ function tableHeaderHtml() {
 }
 function applyColumnWidths() {
   const table = document.querySelector("#table table");
-  if (table) table.style.width = tableWidth() + "px";
+  if (table) table.style.width = "100%";
   document.querySelectorAll("#table col[data-col]").forEach(col => {
     const key = col.getAttribute("data-col");
-    if (columnWidths[key]) col.style.width = columnWidths[key] + "px";
+    if (columnWidths[key]) col.style.width = columnPercent(key);
   });
 }
 function since(iso) {
@@ -1937,7 +2068,20 @@ function renderRows(view) {
   const rows = filteredRows(view.items || []);
   const visibleCount = document.getElementById("visible-count");
   if (visibleCount) {
-    visibleCount.textContent = "Showing " + fmt.format(rows.length) + " of " + fmt.format((view.items || []).length) + " loaded";
+    const loaded = (view.items || []).length;
+    const total = view.total_count || loaded;
+    const limit = state?.source?.item_limit_per_view || loaded;
+    const totalText = total > loaded ? " of " + fmt.format(total) + " total" : "";
+    visibleCount.textContent =
+      "Showing " +
+      fmt.format(rows.length) +
+      " of " +
+      fmt.format(loaded) +
+      " loaded" +
+      totalText +
+      " · max " +
+      fmt.format(limit) +
+      " per view";
   }
   if (!view.items || !view.items.length) {
     document.getElementById("table").innerHTML = '<div class="empty">No matching issues in the current snapshot.</div>';
@@ -1964,7 +2108,7 @@ function renderRows(view) {
       '</tr>';
   }).join("");
   document.getElementById("table").innerHTML =
-    '<div class="table-wrap"><table style="width:' + esc(tableWidth()) + 'px"><colgroup>' +
+    '<div class="table-wrap"><table><colgroup>' +
     colgroupHtml() +
     '</colgroup><thead><tr>' + tableHeaderHtml() + '</tr></thead><tbody>' +
     tableRows +
