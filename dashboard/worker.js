@@ -23,6 +23,7 @@ const TRIAGE_CACHE_TTL_SECONDS = 120;
 const DEFAULT_TRIAGE_ITEMS_PER_VIEW = 500;
 const MAX_TRIAGE_ITEMS_PER_VIEW = 1000;
 const TRIAGE_SEARCH_PAGE_SIZE = 100;
+const TRIAGE_FOCUSED_FALLBACK_ITEMS_PER_VIEW = 100;
 const TRIAGE_LINKED_PR_ITEM_LIMIT = 240;
 const TRIAGE_LINKED_PR_BATCH_SIZE = 25;
 const TRIAGE_LABEL_PREFIX = "clawsweeper:";
@@ -343,10 +344,27 @@ async function triageSnapshot(env) {
   const generatedAt = new Date().toISOString();
   const errors = [];
   const repos = triageTargetRepos(env);
-  const itemLimit = triageItemsPerView(env);
-  const repoSnapshots = await Promise.all(
-    repos.map((repo) => triageSnapshotForRepo(env, repo, errors, itemLimit)),
-  );
+  const searchBudget = { remaining: triageSearchRequestBudget(env) };
+  const itemLimit = triageItemsPerView(env, repos.length, searchBudget.remaining);
+  const repoSnapshots = [];
+  for (let index = 0; index < repos.length; index += 1) {
+    const repo = repos[index];
+    if (searchBudget.remaining < 1) {
+      errors.push(`${repo} triage skipped: search budget exhausted before broad snapshot`);
+      repoSnapshots.push(emptyTriageRepoSnapshot(repo));
+      continue;
+    }
+    repoSnapshots.push(
+      await triageSnapshotForRepo(
+        env,
+        repo,
+        errors,
+        itemLimit,
+        searchBudget,
+        repos.length - index - 1,
+      ),
+    );
+  }
   const views = mergeTriageRepoViews(repoSnapshots, itemLimit);
   await attachTriageLinkedPullRequests(env, views, errors);
   const counts = Object.fromEntries(views.map((view) => [view.id, view.total_count]));
@@ -357,6 +375,7 @@ async function triageSnapshot(env) {
       target_repositories: repos,
       label_prefix: TRIAGE_LABEL_PREFIX,
       item_limit_per_view: itemLimit,
+      search_request_budget_remaining: searchBudget.remaining,
     },
     counts,
     views,
@@ -535,7 +554,31 @@ function normalizePullRequestState(state) {
   return "unknown";
 }
 
-async function triageSnapshotForRepo(env, repo, errors, itemLimit) {
+function emptyTriageRepoSnapshot(repo) {
+  return {
+    repository: repo,
+    labels: [],
+    views: TRIAGE_VIEWS.map((view) => ({
+      id: view.id,
+      repository: repo,
+      title: view.title,
+      description: view.description,
+      query: null,
+      github_url: null,
+      total_count: 0,
+      items: [],
+    })),
+  };
+}
+
+async function triageSnapshotForRepo(
+  env,
+  repo,
+  errors,
+  itemLimit,
+  searchBudget,
+  remainingRepoCount,
+) {
   const repoLabels = await repoClawsweeperLabels(env, repo).catch((error) => {
     errors.push(`${repo} labels: ${error.message}`);
     return [];
@@ -549,12 +592,49 @@ async function triageSnapshotForRepo(env, repo, errors, itemLimit) {
     errors,
     itemLimit,
   );
-  const views = [
-    rootView,
-    ...TRIAGE_VIEWS.slice(1).map((view) =>
-      triageViewFromItems(repo, view, discoveredLabels, rootView.items, itemLimit),
-    ),
-  ];
+  if (rootView.query) {
+    searchBudget.remaining -= rootView.search_failed
+      ? triageSearchPageCount(itemLimit, itemLimit)
+      : triageSearchPageCount(itemLimit, rootView.total_count);
+  }
+  const rootIsComplete = rootView.total_count <= rootView.items.length;
+  const fallbackItemLimit = Math.min(itemLimit, TRIAGE_FOCUSED_FALLBACK_ITEMS_PER_VIEW);
+  const reservedRootSearches = remainingRepoCount * triageSearchPageCount(itemLimit, itemLimit);
+  const focusedViews = [];
+  let budgetExhausted = false;
+  for (const view of TRIAGE_VIEWS.slice(1)) {
+    if (rootIsComplete) {
+      focusedViews.push(
+        triageViewFromItems(repo, view, discoveredLabels, rootView.items, itemLimit),
+      );
+      continue;
+    }
+    const query = triageSearchQuery(repo, view, discoveredLabels);
+    if (query && searchBudget.remaining - reservedRootSearches >= 1) {
+      searchBudget.remaining -= triageSearchPageCount(fallbackItemLimit, fallbackItemLimit);
+      focusedViews.push(
+        await triageViewForRepo(
+          env,
+          repo,
+          view,
+          discoveredLabels,
+          errors,
+          fallbackItemLimit,
+          rootView.items,
+          itemLimit,
+        ),
+      );
+      continue;
+    }
+    if (query) budgetExhausted = true;
+    focusedViews.push(triageViewFromItems(repo, view, discoveredLabels, rootView.items, itemLimit));
+  }
+  if (budgetExhausted) {
+    errors.push(
+      `${repo} focused triage fallback: search budget exhausted; using loaded broad rows`,
+    );
+  }
+  const views = [rootView, ...focusedViews];
   return {
     repository: repo,
     labels: repoLabels,
@@ -619,11 +699,24 @@ function triageItemMatchesView(item, definition, discoveredLabels) {
   return true;
 }
 
-function triageItemsPerView(env) {
-  return Math.min(
+function triageItemsPerView(env, repoCount = 1, searchBudget = triageSearchRequestBudget(env)) {
+  const configured = Math.min(
     MAX_TRIAGE_ITEMS_PER_VIEW,
     Math.max(1, numberFrom(env.TRIAGE_ITEMS_PER_VIEW, DEFAULT_TRIAGE_ITEMS_PER_VIEW)),
   );
+  const rootPagesPerRepo = Math.max(
+    1,
+    Math.floor(Math.max(1, searchBudget - 1) / Math.max(1, repoCount)),
+  );
+  return Math.min(configured, rootPagesPerRepo * TRIAGE_SEARCH_PAGE_SIZE);
+}
+
+function triageSearchRequestBudget(env) {
+  return env.GITHUB_TOKEN ? 28 : 9;
+}
+
+function triageSearchPageCount(limit, totalCount) {
+  return Math.ceil(Math.min(limit, Math.max(1, Number(totalCount || 0))) / TRIAGE_SEARCH_PAGE_SIZE);
 }
 
 function mergeTriageRepoViews(repoSnapshots, itemLimit) {
@@ -675,7 +768,16 @@ function combinedTriageSearchQuery(repoSnapshots, definition, repoViews) {
   return parts.join(" ");
 }
 
-async function triageViewForRepo(env, repo, definition, discoveredLabels, errors, itemLimit) {
+async function triageViewForRepo(
+  env,
+  repo,
+  definition,
+  discoveredLabels,
+  errors,
+  itemLimit,
+  fallbackSourceItems = null,
+  fallbackItemLimit = itemLimit,
+) {
   const query = triageSearchQuery(repo, definition, discoveredLabels);
   if (!query) {
     return {
@@ -691,8 +793,31 @@ async function triageViewForRepo(env, repo, definition, discoveredLabels, errors
   }
   const search = await githubIssueSearch(env, query, itemLimit).catch((error) => {
     errors.push(`${repo} ${definition.id}: ${error.message}`);
-    return { total_count: 0, items: [] };
+    if (fallbackSourceItems) {
+      return {
+        ...triageViewFromItems(
+          repo,
+          definition,
+          discoveredLabels,
+          fallbackSourceItems,
+          fallbackItemLimit,
+        ),
+        search_failed: true,
+      };
+    }
+    return {
+      id: definition.id,
+      repository: repo,
+      title: definition.title,
+      description: definition.description,
+      query,
+      github_url: githubSearchUrl(query),
+      total_count: 0,
+      items: [],
+      search_failed: true,
+    };
   });
+  if (search.search_failed) return search;
   return {
     id: definition.id,
     repository: repo,

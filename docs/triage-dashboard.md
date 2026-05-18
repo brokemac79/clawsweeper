@@ -36,13 +36,21 @@ The focused views are derived from fixed high-signal label combinations:
 | Needs live repro        | `clawsweeper:needs-live-repro`                                              |
 
 The API loads the broad ClawSweeper-labelled issue snapshot once per repository
-and derives the focused views from that loaded snapshot. This keeps the page
-within GitHub Search rate limits instead of firing one Search request for every
-tab. The broad snapshot loads up to `TRIAGE_ITEMS_PER_VIEW`; the default is 500,
-with an upper bound of 1,000 because GitHub Search only exposes the first 1,000
-results for a query. The default is intentionally high enough to cover the
-current ClawSweeper-labelled backlog, so browser-side filtering by older issue
-numbers or assignees works for the existing view data.
+and derives the focused views from that loaded snapshot when the broad snapshot
+is complete. This keeps the page within GitHub Search rate limits instead of
+firing one Search request for every tab. If the broad snapshot is capped, the API
+falls back to direct Search queries for focused views so tab counts and loaded
+rows do not silently look complete. Fallback focused queries load one Search page
+per view by default to stay under GitHub Search rate limits while preserving
+authoritative total counts. The API also keeps a global Search request budget,
+reducing the broad per-repo load when multiple triage repositories are configured
+and falling back to loaded broad rows with a diagnostic after the budget is spent.
+If no root Search budget remains for later repositories, those repositories are
+skipped for that snapshot with a diagnostic instead of overrunning GitHub Search
+limits.
+The broad snapshot loads up to `TRIAGE_ITEMS_PER_VIEW`; the default is 500, with
+an upper bound of 1,000 because GitHub Search only exposes the first 1,000
+results for a query.
 
 The issue table includes assignees and, for issues carrying
 `clawsweeper:linked-pr-open`, linked pull requests from GitHub timeline data. It
