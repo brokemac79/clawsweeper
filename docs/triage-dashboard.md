@@ -51,6 +51,9 @@ limits.
 The broad snapshot loads up to `TRIAGE_ITEMS_PER_VIEW`; the default is 500, with
 an upper bound of 1,000 because GitHub Search only exposes the first 1,000
 results for a query.
+Each returned view includes its own effective `item_limit`, so the dashboard can
+show when a focused fallback view intentionally loaded fewer rows than the broad
+snapshot while still reporting the authoritative total count.
 
 The issue table includes assignees and, for issues carrying
 `clawsweeper:linked-pr-open`, linked pull requests from GitHub timeline data. It

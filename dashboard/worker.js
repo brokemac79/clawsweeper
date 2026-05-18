@@ -652,6 +652,7 @@ function triageViewFromItems(repo, definition, discoveredLabels, sourceItems, it
       description: definition.description,
       query: null,
       github_url: null,
+      item_limit: itemLimit,
       total_count: 0,
       items: [],
     };
@@ -667,6 +668,7 @@ function triageViewFromItems(repo, definition, discoveredLabels, sourceItems, it
     description: definition.description,
     query,
     github_url: githubSearchUrl(query),
+    item_limit: itemLimit,
     total_count: items.length,
     items,
   };
@@ -730,6 +732,8 @@ function mergeTriageRepoViews(repoSnapshots, itemLimit) {
       .slice(0, itemLimit);
     const totalCount = repoViews.reduce((total, view) => total + (view?.total_count || 0), 0);
     const combinedQuery = combinedTriageSearchQuery(repoSnapshots, definition, repoViews);
+    const viewItemLimit =
+      Math.max(...repoViews.map((view) => view?.item_limit || 0).filter(Boolean)) || itemLimit;
     return {
       id: definition.id,
       title: definition.title,
@@ -737,6 +741,7 @@ function mergeTriageRepoViews(repoSnapshots, itemLimit) {
       total_count: totalCount,
       query: combinedQuery,
       github_url: combinedQuery ? githubSearchUrl(combinedQuery) : null,
+      item_limit: viewItemLimit,
       items,
     };
   });
@@ -787,6 +792,7 @@ async function triageViewForRepo(
       description: definition.description,
       query: null,
       github_url: null,
+      item_limit: itemLimit,
       total_count: 0,
       items: [],
     };
@@ -812,6 +818,7 @@ async function triageViewForRepo(
       description: definition.description,
       query,
       github_url: githubSearchUrl(query),
+      item_limit: itemLimit,
       total_count: 0,
       items: [],
       search_failed: true,
@@ -825,6 +832,7 @@ async function triageViewForRepo(
     description: definition.description,
     query,
     github_url: githubSearchUrl(query),
+    item_limit: itemLimit,
     total_count: search.total_count || 0,
     items: Array.isArray(search.items)
       ? search.items.map((issue) => normalizeTriageIssue(repo, issue))
@@ -2195,8 +2203,8 @@ function renderRows(view) {
   if (visibleCount) {
     const loaded = (view.items || []).length;
     const total = view.total_count || loaded;
-    const limit = state?.source?.item_limit_per_view || loaded;
-    const totalText = total > loaded ? " of " + fmt.format(total) + " total" : "";
+    const limit = view.item_limit || state?.source?.item_limit_per_view || loaded;
+    const totalText = total > loaded ? " \\u00b7 " + fmt.format(total) + " total" : "";
     visibleCount.textContent =
       "Showing " +
       fmt.format(rows.length) +
@@ -2206,7 +2214,7 @@ function renderRows(view) {
       totalText +
       " · max " +
       fmt.format(limit) +
-      " per view";
+      " for this view";
   }
   if (!view.items || !view.items.length) {
     document.getElementById("table").innerHTML = '<div class="empty">No matching issues in the current snapshot.</div>';

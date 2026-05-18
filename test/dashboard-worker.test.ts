@@ -822,8 +822,11 @@ test("triage focused views use direct search when broad snapshot is capped", asy
       },
     );
     const snapshot = await response.json();
+    const root = snapshot.views.find((view: { id: string }) => view.id === "clawsweeper");
     const ready = snapshot.views.find((view: { id: string }) => view.id === "ready-candidates");
+    assert.equal(root.item_limit, 500);
     assert.equal(ready.total_count, 2);
+    assert.equal(ready.item_limit, 100);
     assert.equal(readyPerPage, "100");
     assert.deepEqual(
       ready.items.map((item: { number: number }) => item.number),
