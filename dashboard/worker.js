@@ -27,6 +27,8 @@ const TRIAGE_FOCUSED_FALLBACK_ITEMS_PER_VIEW = 100;
 const TRIAGE_LINKED_PR_ITEM_LIMIT = 240;
 const TRIAGE_LINKED_PR_BATCH_SIZE = 25;
 const TRIAGE_LABEL_PREFIX = "clawsweeper:";
+const GITHUB_APP_TOKEN_REFRESH_SKEW_MS = 120_000;
+const GITHUB_APP_TOKEN_DEFAULT_TTL_MS = 50 * 60_000;
 const TRIAGE_VIEWS = [
   {
     id: "clawsweeper",
@@ -79,6 +81,8 @@ const TRIAGE_VIEWS = [
     allLabels: ["clawsweeper:needs-live-repro"],
   },
 ];
+
+let githubAppTokenCache = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -390,8 +394,10 @@ async function attachTriageLinkedPullRequests(env, views, errors) {
   for (const item of allItems) item.linked_pull_requests = [];
   const items = uniqueTriageItems(views);
   if (!items.length) return;
-  if (!env.GITHUB_TOKEN) {
-    errors.push("linked pull requests: GITHUB_TOKEN is required for GraphQL enrichment");
+  if (!hasGithubAuth(env)) {
+    errors.push(
+      "linked pull requests: GITHUB_TOKEN or ClawSweeper GitHub App credentials are required for GraphQL enrichment",
+    );
     return;
   }
   const limitedItems = items.slice(0, TRIAGE_LINKED_PR_ITEM_LIMIT);
@@ -714,7 +720,7 @@ function triageItemsPerView(env, repoCount = 1, searchBudget = triageSearchReque
 }
 
 function triageSearchRequestBudget(env) {
-  return env.GITHUB_TOKEN ? 28 : 9;
+  return hasGithubAuth(env) ? 28 : 9;
 }
 
 function triageSearchPageCount(limit, totalCount) {
@@ -1455,6 +1461,7 @@ function storeCacheRequest(key) {
 }
 
 async function githubJson(env, path) {
+  const token = await githubAuthToken(env);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("timeout"), GITHUB_TIMEOUT_MS);
   const response = await fetch(`https://api.github.com${path}`, {
@@ -1462,7 +1469,7 @@ async function githubJson(env, path) {
     headers: {
       Accept: "application/vnd.github+json",
       "User-Agent": "openclaw-clawsweeper-status",
-      ...(env.GITHUB_TOKEN ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   }).finally(() => clearTimeout(timeout));
   if (!response.ok) throw new Error(`GitHub ${response.status} for ${path}`);
@@ -1470,6 +1477,8 @@ async function githubJson(env, path) {
 }
 
 async function githubGraphql(env, query, variables) {
+  const token = await githubAuthToken(env);
+  if (!token) throw new Error("GitHub auth is required for GraphQL");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("timeout"), OPTIONAL_SECTION_TIMEOUT_MS);
   const response = await fetch("https://api.github.com/graphql", {
@@ -1479,7 +1488,7 @@ async function githubGraphql(env, query, variables) {
       Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
       "User-Agent": "openclaw-clawsweeper-status",
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({ query, variables }),
   }).finally(() => clearTimeout(timeout));
@@ -1489,6 +1498,221 @@ async function githubGraphql(env, query, variables) {
     throw new Error(payload.errors.map((error) => error.message).join("; "));
   }
   return payload.data;
+}
+
+function hasGithubAuth(env) {
+  return Boolean(env.GITHUB_TOKEN || githubAppCredentials(env));
+}
+
+async function githubAuthToken(env) {
+  if (env.GITHUB_TOKEN) return String(env.GITHUB_TOKEN);
+  const credentials = githubAppCredentials(env);
+  if (!credentials) return "";
+
+  const now = Date.now();
+  const repos = triageTargetRepos(env);
+  const cacheKey = [
+    credentials.issuer,
+    credentials.installationId || repos[0] || "",
+    repos.join(","),
+  ].join("|");
+  if (
+    githubAppTokenCache?.key === cacheKey &&
+    githubAppTokenCache.expiresAtMs - GITHUB_APP_TOKEN_REFRESH_SKEW_MS > now
+  ) {
+    return githubAppTokenCache.token;
+  }
+  if (githubAppTokenCache?.key === cacheKey && githubAppTokenCache.promise) {
+    return githubAppTokenCache.promise;
+  }
+
+  const promise = createGithubAppInstallationToken(env, credentials, repos)
+    .then((result) => {
+      githubAppTokenCache = {
+        key: cacheKey,
+        token: result.token,
+        expiresAtMs: result.expiresAtMs,
+      };
+      return result.token;
+    })
+    .catch((error) => {
+      githubAppTokenCache = null;
+      throw error;
+    });
+  githubAppTokenCache = {
+    key: cacheKey,
+    token: "",
+    expiresAtMs: 0,
+    promise,
+  };
+  return promise;
+}
+
+function githubAppCredentials(env) {
+  const issuer = stringEnv(env.CLAWSWEEPER_APP_ID) || stringEnv(env.CLAWSWEEPER_APP_CLIENT_ID);
+  const privateKey = normalizePrivateKey(env.CLAWSWEEPER_APP_PRIVATE_KEY);
+  if (!issuer || !privateKey) return null;
+  return {
+    issuer,
+    privateKey,
+    installationId: stringEnv(env.CLAWSWEEPER_APP_INSTALLATION_ID),
+  };
+}
+
+async function createGithubAppInstallationToken(env, credentials, repos) {
+  const appJwt = await signGithubAppJwt(credentials.issuer, credentials.privateKey);
+  const installationId =
+    credentials.installationId || (await githubAppInstallationId(appJwt, repos[0]));
+  const payload = await githubAppJson(
+    `/app/installations/${installationId}/access_tokens`,
+    appJwt,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        permissions: {
+          actions: "read",
+          checks: "read",
+          contents: "read",
+          issues: "read",
+          pull_requests: "read",
+        },
+      }),
+      errorLabel: "GitHub App token",
+    },
+  );
+  const token = String(payload.token || "");
+  if (!token) throw new Error("GitHub App token response missing token");
+  const expiresAtMs = payload.expires_at
+    ? Date.parse(payload.expires_at)
+    : Date.now() + GITHUB_APP_TOKEN_DEFAULT_TTL_MS;
+  return { token, expiresAtMs };
+}
+
+async function githubAppInstallationId(appJwt, repo) {
+  if (!repo || !repo.includes("/")) throw new Error("GitHub App installation repo is required");
+  const payload = await githubAppJson(`/repos/${repo}/installation`, appJwt, {
+    errorLabel: "GitHub App installation",
+  });
+  const installationId = Number(payload.id);
+  if (!Number.isInteger(installationId) || installationId <= 0) {
+    throw new Error(`GitHub App installation response missing id for ${repo}`);
+  }
+  return String(installationId);
+}
+
+async function githubAppJson(path, appJwt, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("timeout"), GITHUB_TIMEOUT_MS);
+  const response = await fetch(`https://api.github.com${path}`, {
+    method: options.method || "GET",
+    signal: controller.signal,
+    headers: {
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "User-Agent": "openclaw-clawsweeper-status",
+      Authorization: `Bearer ${appJwt}`,
+    },
+    body: options.body,
+  }).finally(() => clearTimeout(timeout));
+  if (!response.ok) throw new Error(`${options.errorLabel || "GitHub App"} ${response.status}`);
+  return response.json();
+}
+
+async function signGithubAppJwt(issuer, privateKey) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = base64UrlEncode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: issuer }));
+  const input = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToPkcs8(privateKey),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(input),
+  );
+  return `${input}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+function normalizePrivateKey(value) {
+  return stringEnv(value)?.replace(/\\n/g, "\n") || "";
+}
+
+function pemToPkcs8(pem) {
+  const pkcs8 = pemBody(pem, "PRIVATE KEY");
+  if (pkcs8) return pkcs8;
+  const pkcs1 = pemBody(pem, "RSA PRIVATE KEY");
+  if (!pkcs1) throw new Error("GitHub App private key must be PEM encoded");
+  return wrapPkcs1PrivateKey(pkcs1);
+}
+
+function pemBody(pem, label) {
+  const pattern = new RegExp(
+    `-----BEGIN ${label}-----([\\s\\S]+?)-----END ${label}-----`,
+    "m",
+  );
+  const match = String(pem).match(pattern);
+  if (!match) return null;
+  const binary = atob(match[1].replace(/\s+/g, ""));
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function wrapPkcs1PrivateKey(pkcs1) {
+  const version = new Uint8Array([0x02, 0x01, 0x00]);
+  const algorithm = new Uint8Array([
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+  ]);
+  const octetString = derElement(0x04, pkcs1);
+  return derElement(0x30, concatBytes(version, algorithm, octetString));
+}
+
+function derElement(tag, value) {
+  return concatBytes(new Uint8Array([tag]), derLength(value.length), value);
+}
+
+function derLength(length) {
+  if (length < 0x80) return new Uint8Array([length]);
+  const bytes = [];
+  let value = length;
+  while (value > 0) {
+    bytes.unshift(value & 0xff);
+    value >>= 8;
+  }
+  return new Uint8Array([0x80 | bytes.length, ...bytes]);
+}
+
+function concatBytes(...parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
+function base64UrlEncode(value) {
+  const bytes =
+    typeof value === "string"
+      ? new TextEncoder().encode(value)
+      : value instanceof Uint8Array
+        ? value
+        : new Uint8Array(value);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function stringEnv(value) {
+  const text = String(value || "").trim();
+  return text ? text : "";
 }
 
 async function withTimeout(promise, timeoutMs, label) {

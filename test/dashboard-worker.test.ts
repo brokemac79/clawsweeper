@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
 import worker from "../dashboard/worker.js";
@@ -1077,6 +1078,143 @@ test("triage debits failed root searches from the search budget", async () => {
     assert.equal(searchRequests, 9);
     assert.equal(snapshot.source.search_request_budget_remaining, 0);
     assert.match(snapshot.diagnostics.errors.join("\n"), /repo-9 triage skipped/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
+  }
+});
+
+test("triage uses ClawSweeper GitHub App credentials when no static token is configured", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalCaches = globalThis.caches;
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    value: {
+      default: {
+        match: async () => undefined,
+        put: async () => undefined,
+      },
+    },
+  });
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  let sawAppJwt = false;
+  let sawInstallationToken = false;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = String(new Headers(init?.headers).get("authorization") || "");
+    if (url.pathname === "/repos/openclaw/openclaw/installation") {
+      sawAppJwt = authorization.startsWith("Bearer ");
+      return jsonResponse({ id: 12345 });
+    }
+    if (url.pathname === "/app/installations/12345/access_tokens") {
+      sawAppJwt = authorization.startsWith("Bearer ");
+      return jsonResponse({
+        token: "installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+    }
+    if (url.pathname === "/repos/openclaw/openclaw/labels") {
+      sawInstallationToken = authorization === "Bearer installation-token";
+      return jsonResponse([{ name: "clawsweeper:queueable-fix", color: "0E8A16" }]);
+    }
+    if (url.pathname === "/search/issues") {
+      sawInstallationToken = authorization === "Bearer installation-token";
+      return jsonResponse({
+        total_count: 1,
+        items: [triageIssue(101, ["clawsweeper:queueable-fix"])],
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://clawsweeper.openclaw.ai/api/triage"),
+      {
+        CLAWSWEEPER_APP_CLIENT_ID: "Iv23test",
+        CLAWSWEEPER_APP_PRIVATE_KEY: String(privateKey),
+        TARGET_REPOS: "openclaw/openclaw",
+        TRIAGE_CACHE_TTL_SECONDS: "0",
+      },
+      {
+        waitUntil: () => undefined,
+      },
+    );
+    const snapshot = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(snapshot.source.search_request_budget_remaining, 27);
+    assert.equal(sawAppJwt, true);
+    assert.equal(sawInstallationToken, true);
+    assert.doesNotMatch(snapshot.diagnostics.errors.join("\n"), /GITHUB_TOKEN/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
+  }
+});
+
+test("dashboard shares in-flight GitHub App installation token across parallel requests", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalCaches = globalThis.caches;
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    value: {
+      default: {
+        match: async () => undefined,
+        put: async () => undefined,
+      },
+    },
+  });
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  let tokenRequests = 0;
+  let badBearer = "";
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = String(new Headers(init?.headers).get("authorization") || "");
+    if (url.pathname === "/repos/openclaw/openclaw/installation") {
+      return jsonResponse({ id: 12345 });
+    }
+    if (url.pathname === "/app/installations/12345/access_tokens") {
+      tokenRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return jsonResponse({
+        token: "installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+    }
+    if (url.hostname === "api.github.com") {
+      if (authorization !== "Bearer installation-token") badBearer = authorization;
+      if (url.pathname.endsWith("/actions/runs")) return jsonResponse({ workflow_runs: [] });
+      if (url.pathname === "/search/issues") return jsonResponse({ total_count: 0, items: [] });
+      if (url.pathname.endsWith("/issues")) return jsonResponse([]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://clawsweeper.openclaw.ai/api/status"),
+      {
+        CLAWSWEEPER_APP_CLIENT_ID: "Iv23parallel",
+        CLAWSWEEPER_APP_PRIVATE_KEY: String(privateKey),
+        CLAWSWEEPER_REPO: "openclaw/clawsweeper",
+        TARGET_REPOS: "openclaw/openclaw",
+        CACHE_TTL_SECONDS: "0",
+      },
+      {
+        waitUntil: () => undefined,
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(tokenRequests, 1);
+    assert.equal(badBearer, "");
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
