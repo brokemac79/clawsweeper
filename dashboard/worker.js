@@ -1651,10 +1651,7 @@ function pemToPkcs8(pem) {
 }
 
 function pemBody(pem, label) {
-  const pattern = new RegExp(
-    `-----BEGIN ${label}-----([\\s\\S]+?)-----END ${label}-----`,
-    "m",
-  );
+  const pattern = new RegExp(`-----BEGIN ${label}-----([\\s\\S]+?)-----END ${label}-----`, "m");
   const match = String(pem).match(pattern);
   if (!match) return null;
   const binary = atob(match[1].replace(/\s+/g, ""));
@@ -2436,7 +2433,7 @@ function renderRows(view) {
       fmt.format(loaded) +
       " loaded" +
       totalText +
-      " · max " +
+      " \u00b7 max " +
       fmt.format(limit) +
       " for this view";
   }
