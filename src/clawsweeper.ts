@@ -10263,6 +10263,9 @@ function unsafeCanonicalPullRequestReason(
       return `linked canonical PR #${linkedPull.number} is F-rated`;
     }
   }
+  if (!proofPassed) {
+    return `linked canonical PR #${linkedPull.number} has no positive real behavior proof`;
+  }
 
   return null;
 }

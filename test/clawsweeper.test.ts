@@ -7958,6 +7958,7 @@ test("apply-decisions promotes PRs superseded by linked pull requests", () => {
             state: "open",
             merged_at: null,
             mergeable_state: "clean",
+            labels: ["proof: sufficient"],
           },
         },
       }),
@@ -7991,6 +7992,76 @@ test("apply-decisions promotes PRs superseded by linked pull requests", () => {
     assert.match(
       report.find((entry) => entry.action === "closed")?.reason ?? "",
       /duplicate or superseded/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apply-decisions does not promote PRs superseded by no-proof linked pull requests", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+    const synced = reportWithSyncedReviewComment(
+      stalePullRequestReport({
+        number: 334,
+        title: "Old activity PR",
+        pr_rating_overall: "D",
+        pr_rating_proof: "D",
+        work_cluster_refs: JSON.stringify([
+          "Superseded by https://github.com/openclaw/openclaw/pull/400",
+        ]),
+      }),
+      334,
+      "none",
+    );
+    writeFileSync(join(itemsDir, "334.md"), synced.report, "utf8");
+
+    withMockGh(
+      root,
+      promotionGhMock({
+        number: 334,
+        title: "Old activity PR",
+        comment: synced.comment,
+        linkedPulls: {
+          400: {
+            number: 400,
+            title: "Canonical activity PR without proof",
+            html_url: "https://github.com/openclaw/openclaw/pull/400",
+            state: "open",
+            merged_at: null,
+            mergeable_state: "clean",
+          },
+        },
+      }),
+      () => {
+        runApplyDecisionsForTest({
+          itemsDir,
+          closedDir,
+          plansDir,
+          reportPath,
+          extraArgs: [
+            "--target-repo",
+            "openclaw/openclaw",
+            "--dry-run",
+            "--apply-kind",
+            "all",
+            "--processed-limit",
+            "3",
+          ],
+        });
+      },
+    );
+
+    const report = JSON.parse(readFileSync(reportPath, "utf8")) as Array<{ action: string }>;
+    assert.equal(
+      report.some((entry) => entry.action === "closed"),
+      false,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
