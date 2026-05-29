@@ -58,7 +58,13 @@ async function findCommandStatusComment(options: Options): Promise<LooseRecord |
   let shouldContinue = true;
   while (shouldContinue) {
     const exact = fetchExactStatusComment(options);
-    if (exact && !commandAckMarkerFromBody(exact.body)) return exact;
+    if (
+      exact &&
+      !commandAckMarkerFromBody(exact.body) &&
+      !statusMarkerDiffersFromRequested(exact.body, options.marker)
+    ) {
+      return exact;
+    }
     let comments: LooseRecord[];
     try {
       comments = ghPagedWithRetry<LooseRecord>(
@@ -66,7 +72,7 @@ async function findCommandStatusComment(options: Options): Promise<LooseRecord |
         { attempts: 3 },
       );
     } catch (error) {
-      if (exact) return exact;
+      if (exact && !statusMarkerDiffersFromRequested(exact.body, options.marker)) return exact;
       throw error;
     }
     const match = selectCommandStatusComment(comments, options);
@@ -74,7 +80,7 @@ async function findCommandStatusComment(options: Options): Promise<LooseRecord |
       pruneDuplicateCommandAckComments({ comments, keep: match, options });
       return match;
     }
-    if (exact) return exact;
+    if (exact && !statusMarkerDiffersFromRequested(exact.body, options.marker)) return exact;
     shouldContinue = Date.now() < deadline;
     if (!shouldContinue) break;
     await sleep(5000);
@@ -109,7 +115,11 @@ export function selectCommandStatusComment(
         Number(comment.id ?? 0) === options.statusCommentId &&
         isTrustedStatusComment(comment, options.trustedBots),
     );
-    if (exact) return matchingAckCommentForStatus(comments, exact, options) ?? exact;
+    if (exact) {
+      const match = matchingAckCommentForStatus(comments, exact, options);
+      if (match) return match;
+      if (!statusMarkerDiffersFromRequested(exact.body, options.marker)) return exact;
+    }
   }
   if (!options.marker) return null;
   return (
@@ -136,7 +146,7 @@ function matchingAckCommentForStatus(
     ? matching.filter((comment) => String(comment.body ?? "").includes(options.marker))
     : [];
   if (sameStatus.length > 0) return selectCommandAckKeeper(sameStatus);
-  if (matching.some((comment) => commandStatusMarkerFromBody(comment.body))) return exact;
+  if (matching.some((comment) => commandStatusMarkerFromBody(comment.body))) return null;
   return selectCommandAckKeeper(matching);
 }
 
@@ -184,6 +194,11 @@ function commandStatusMarkerFromBody(body: JsonValue) {
   return (
     String(body ?? "").match(new RegExp("<!--\\s*clawsweeper-command-status:[^>]+-->"))?.[0] ?? null
   );
+}
+
+function statusMarkerDiffersFromRequested(body: JsonValue, requestedStatusMarker: string) {
+  const statusMarker = commandStatusMarkerFromBody(body);
+  return Boolean(requestedStatusMarker && statusMarker && statusMarker !== requestedStatusMarker);
 }
 
 function isPrunableCommandAckDuplicate(comment: LooseRecord, requestedStatusMarker: string) {

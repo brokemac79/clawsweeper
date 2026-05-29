@@ -224,6 +224,45 @@ test("selectCommandStatusComment scopes shared ack markers to the requested stat
   assert.equal(selected?.id, 4466201000);
 });
 
+test("selectCommandStatusComment skips stale exact status-bearing ack comments", () => {
+  const oldMarker = "<!-- clawsweeper-command-status:81564:re_review:old -->";
+  const newMarker = "<!-- clawsweeper-command-status:81564:re_review:new -->";
+  const options = parseOptions(["--marker", newMarker, "--status-comment-id", "4466201000"]);
+  const selected = selectCommandStatusComment(
+    [
+      {
+        id: 4466201000,
+        created_at: "2026-05-29T19:19:39Z",
+        updated_at: "2026-05-29T19:20:00Z",
+        user: { login: "clawsweeper[bot]" },
+        body: [
+          oldMarker,
+          "<!-- clawsweeper-command-ack:4466201487 -->",
+          "ClawSweeper re-review requested.",
+          "<!-- clawsweeper-command-progress:start -->",
+          "Re-review progress:",
+          "- State: In progress",
+          "<!-- clawsweeper-command-progress:end -->",
+        ].join("\n"),
+      },
+      {
+        id: 4466202000,
+        created_at: "2026-05-29T19:21:00Z",
+        updated_at: "2026-05-29T19:22:00Z",
+        user: { login: "clawsweeper[bot]" },
+        body: [newMarker, "ClawSweeper re-review requested."].join("\n"),
+      },
+    ],
+    {
+      marker: options.marker,
+      statusCommentId: options.statusCommentId,
+      trustedBots: options.trustedBots,
+    },
+  );
+
+  assert.equal(selected?.id, 4466202000);
+});
+
 test("selectCommandStatusComment matches full fast ack markers", () => {
   const marker = "<!-- clawsweeper-command-status:81564:re_review:320c867f -->";
   const options = parseOptions(["--marker", marker, "--status-comment-id", "12"]);
