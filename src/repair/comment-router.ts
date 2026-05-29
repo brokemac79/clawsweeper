@@ -251,6 +251,7 @@ const report: LooseRecord = {
 if (execute) {
   await measureAsync("execute_commands", async () => {
     assertMutationActorIsClawsweeperBot();
+    for (const command of commands) convergePrecreatedCommandAckComments(command);
     for (const command of commands) acknowledgeSkippedMaintainerCommand(command);
     const capacityRequests = workerCapacityRequests(actionable);
     if (capacityRequests.length > 0) {
@@ -2968,13 +2969,15 @@ function hasExistingModeStatusResponse(number: JsonValue, intent: JsonValue) {
 function postComment(command: LooseRecord, body: string) {
   const existing =
     findExistingCommandStatusComment(command) ?? findPrecreatedCommandStatusComment(command);
+  const ackMarker = existing ? commandAckMarkerFromBody(existing.body) : null;
+  const responseBody = ackMarker && !body.includes(ackMarker) ? `${ackMarker}\n${body}` : body;
   const nextBody = usesSharedAutomergeStatus(command)
     ? mergeAutomergeTimelineSection({
-        body,
+        body: responseBody,
         existingBody: existing?.body,
         events: automergeTimelineEvents(command, body),
       })
-    : body;
+    : responseBody;
   const payloadPath = writePayload(repoRoot(), `comment-router-${command.comment_id}`, {
     body: nextBody,
   });
@@ -3001,15 +3004,99 @@ function postComment(command: LooseRecord, body: string) {
 }
 
 function findPrecreatedCommandStatusComment(command: LooseRecord) {
+  const converged = convergePrecreatedCommandAckComments(command);
+  if (converged) return converged;
   const statusCommentId = Number(command.status_comment_id ?? 0);
   if (!Number.isInteger(statusCommentId) || statusCommentId <= 0) return null;
   const comment = fetchIssueComment(statusCommentId);
   if (!comment || !isTrustedStatusComment(comment)) return null;
   if (issueNumberFromUrl(comment.issue_url) !== Number(command.issue_number)) return null;
-  if (!String(comment.body ?? "").includes(`clawsweeper-command-ack:${command.comment_id}`)) {
+  if (commandAckMarkerFromBody(comment.body) !== commandAckMarkerForCommentId(command.comment_id))
+    return null;
+  return comment;
+}
+
+function convergePrecreatedCommandAckComments(command: LooseRecord) {
+  if (!command.issue_number || !command.comment_id) return null;
+  try {
+    return convergePrecreatedCommandAckCommentsInner(command);
+  } catch (error) {
+    console.warn(
+      `[comment-router] warning: fast ack convergence failed for ${command.repo}#${command.issue_number}: ${compactText(ghErrorText(error), 160)}`,
+    );
     return null;
   }
-  return comment;
+}
+
+function convergePrecreatedCommandAckCommentsInner(command: LooseRecord) {
+  const marker = commandAckMarkerForCommentId(command.comment_id);
+  const comments = cachedIssueComments(command.issue_number)
+    .filter(
+      (comment: JsonValue) =>
+        isTrustedStatusComment(comment) && commandAckMarkerFromBody(comment.body) === marker,
+    )
+    .sort(compareCommentsByCreatedAt);
+  if (comments.length === 0) return null;
+  const keep = selectCommandAckKeeper(comments) as LooseRecord;
+  const keepId = Number(keep.id ?? 0) || 0;
+  let deleted = false;
+  for (const comment of comments) {
+    const id = Number(comment.id ?? 0) || 0;
+    if (id <= 0 || id === keepId) continue;
+    ghBestEffort(["api", `repos/${command.repo}/issues/comments/${id}`, "--method", "DELETE"]);
+    deleted = true;
+  }
+  if (deleted) issueCommentsCache.delete(Number(command.issue_number));
+  return keep;
+}
+
+function commandAckMarkerForCommentId(commentId: JsonValue) {
+  return `<!-- clawsweeper-command-ack:${commentId} -->`;
+}
+
+function commandAckMarkerFromBody(body: JsonValue) {
+  return String(body ?? "").match(/<!--\s*clawsweeper-command-ack:\d+\s*-->/)?.[0] ?? null;
+}
+
+function selectCommandAckKeeper(comments: JsonValue[]) {
+  return [...comments].sort(compareCommandAckKeepPriority)[0] ?? null;
+}
+
+function compareCommandAckKeepPriority(left: JsonValue, right: JsonValue) {
+  const leftRecord = left as LooseRecord;
+  const rightRecord = right as LooseRecord;
+  const leftStatus = commandAckStatusScore(leftRecord);
+  const rightStatus = commandAckStatusScore(rightRecord);
+  if (leftStatus !== rightStatus) return rightStatus - leftStatus;
+  if (leftStatus > 0) return compareCommentsByUpdatedAtDesc(leftRecord, rightRecord);
+  return compareCommentsByCreatedAt(leftRecord, rightRecord);
+}
+
+function commandAckStatusScore(comment: LooseRecord) {
+  const body = String(comment.body ?? "");
+  return body.includes("clawsweeper-command-status:") ||
+    body.includes("<!-- clawsweeper-command-progress:start -->")
+    ? 1
+    : 0;
+}
+
+function compareCommentsByUpdatedAtDesc(left: LooseRecord, right: LooseRecord) {
+  const leftUpdated = String(left.updated_at ?? left.created_at ?? "");
+  const rightUpdated = String(right.updated_at ?? right.created_at ?? "");
+  return (
+    rightUpdated.localeCompare(leftUpdated) || (Number(right.id) || 0) - (Number(left.id) || 0)
+  );
+}
+
+function compareCommentsByCreatedAt(left: JsonValue, right: JsonValue) {
+  const leftRecord = left as LooseRecord;
+  const rightRecord = right as LooseRecord;
+  const leftCreated = String(leftRecord.created_at ?? "");
+  const rightCreated = String(rightRecord.created_at ?? "");
+  return (
+    leftCreated.localeCompare(rightCreated) ||
+    (Number(leftRecord.id) || 0) - (Number(rightRecord.id) || 0)
+  );
 }
 
 function automergeTimelineEvents(command: LooseRecord, body: string) {
