@@ -37,6 +37,7 @@ import {
   buildAutomergeMergeArgs,
   buildAutomergeSquashMessage,
   commandHasAction,
+  commandStatusMarkerFromBody,
   createCachedIssueCommentsLookup,
   createCachedIssueCommentsLookupAsync,
   createCachedLabelNumberLookup,
@@ -52,6 +53,7 @@ import {
   maintainerAutomergeOptInApprovesNeedsHuman as maintainerAutomergeOptInApprovesNeedsHumanReason,
   latestRepairLoopResumeTime,
   parseRoutedCommentCommand,
+  planCommandAckConvergence,
   pausedModeStatusBlocksReplay,
   parseTrustedAutomation,
   repairableCheckBlockers,
@@ -3013,6 +3015,8 @@ function findPrecreatedCommandStatusComment(command: LooseRecord) {
   if (issueNumberFromUrl(comment.issue_url) !== Number(command.issue_number)) return null;
   if (commandAckMarkerFromBody(comment.body) !== commandAckMarkerForCommentId(command.comment_id))
     return null;
+  const statusMarker = commandStatusMarkerFromBody(comment.body);
+  if (statusMarker && statusMarker !== commandStatusMarker(command)) return null;
   return comment;
 }
 
@@ -3030,19 +3034,20 @@ function convergePrecreatedCommandAckComments(command: LooseRecord) {
 
 function convergePrecreatedCommandAckCommentsInner(command: LooseRecord) {
   const marker = commandAckMarkerForCommentId(command.comment_id);
-  const comments = cachedIssueComments(command.issue_number)
-    .filter(
-      (comment: JsonValue) =>
-        isTrustedStatusComment(comment) && commandAckMarkerFromBody(comment.body) === marker,
-    )
-    .sort(compareCommentsByCreatedAt);
+  const comments = cachedIssueComments(command.issue_number).filter(
+    (comment: JsonValue) =>
+      isTrustedStatusComment(comment) && commandAckMarkerFromBody(comment.body) === marker,
+  );
   if (comments.length === 0) return null;
-  const keep = selectCommandAckKeeper(comments) as LooseRecord;
-  const keepId = Number(keep.id ?? 0) || 0;
+  const { keep, prunable } = planCommandAckConvergence(
+    comments as LooseRecord[],
+    commandStatusMarker(command),
+  );
+  if (!keep) return null;
   let deleted = false;
-  for (const comment of comments) {
+  for (const comment of prunable) {
     const id = Number(comment.id ?? 0) || 0;
-    if (id <= 0 || id === keepId) continue;
+    if (id <= 0) continue;
     ghBestEffort(["api", `repos/${command.repo}/issues/comments/${id}`, "--method", "DELETE"]);
     deleted = true;
   }
@@ -3056,47 +3061,6 @@ function commandAckMarkerForCommentId(commentId: JsonValue) {
 
 function commandAckMarkerFromBody(body: JsonValue) {
   return String(body ?? "").match(/<!--\s*clawsweeper-command-ack:\d+\s*-->/)?.[0] ?? null;
-}
-
-function selectCommandAckKeeper(comments: JsonValue[]) {
-  return [...comments].sort(compareCommandAckKeepPriority)[0] ?? null;
-}
-
-function compareCommandAckKeepPriority(left: JsonValue, right: JsonValue) {
-  const leftRecord = left as LooseRecord;
-  const rightRecord = right as LooseRecord;
-  const leftStatus = commandAckStatusScore(leftRecord);
-  const rightStatus = commandAckStatusScore(rightRecord);
-  if (leftStatus !== rightStatus) return rightStatus - leftStatus;
-  if (leftStatus > 0) return compareCommentsByUpdatedAtDesc(leftRecord, rightRecord);
-  return compareCommentsByCreatedAt(leftRecord, rightRecord);
-}
-
-function commandAckStatusScore(comment: LooseRecord) {
-  const body = String(comment.body ?? "");
-  return body.includes("clawsweeper-command-status:") ||
-    body.includes("<!-- clawsweeper-command-progress:start -->")
-    ? 1
-    : 0;
-}
-
-function compareCommentsByUpdatedAtDesc(left: LooseRecord, right: LooseRecord) {
-  const leftUpdated = String(left.updated_at ?? left.created_at ?? "");
-  const rightUpdated = String(right.updated_at ?? right.created_at ?? "");
-  return (
-    rightUpdated.localeCompare(leftUpdated) || (Number(right.id) || 0) - (Number(left.id) || 0)
-  );
-}
-
-function compareCommentsByCreatedAt(left: JsonValue, right: JsonValue) {
-  const leftRecord = left as LooseRecord;
-  const rightRecord = right as LooseRecord;
-  const leftCreated = String(leftRecord.created_at ?? "");
-  const rightCreated = String(rightRecord.created_at ?? "");
-  return (
-    leftCreated.localeCompare(rightCreated) ||
-    (Number(leftRecord.id) || 0) - (Number(rightRecord.id) || 0)
-  );
 }
 
 function automergeTimelineEvents(command: LooseRecord, body: string) {
