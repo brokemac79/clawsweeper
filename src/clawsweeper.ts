@@ -8915,6 +8915,16 @@ function isReleaseTitle(title: string | undefined): boolean {
   return /^(?:release|chore\(release\)|version bump)(?=\b|:)/i.test(title?.trim() ?? "");
 }
 
+function proofNudgeReportProtectedReason(markdown: string): string | undefined {
+  if (frontMatterValue(markdown, "item_category") === "security") {
+    return "latest report item category is security";
+  }
+  if (reportSecurityReview(markdown).status === "needs_attention") {
+    return "latest report security review needs attention";
+  }
+  return undefined;
+}
+
 function proofNudgeMarker(options: { number: number; headSha: string; timestamp: string }): string {
   return `${PROOF_NUDGE_MARKER_PREFIX} item="${options.number}" sha="${options.headSha}" at="${options.timestamp}" v="${PROOF_NUDGE_MARKER_VERSION}" -->`;
 }
@@ -9113,6 +9123,10 @@ function proofNudgeEligibility(options: ProofNudgeEligibilityOptions): ProofNudg
       ? `protected label: ${protectedLabelsForNudge.join(", ")}`
       : "release-style PR title";
     return { eligible: false, action: "skipped_protected_label", reason };
+  }
+  const reportProtectedReason = proofNudgeReportProtectedReason(options.markdown);
+  if (reportProtectedReason) {
+    return { eligible: false, action: "skipped_protected_label", reason: reportProtectedReason };
   }
   if (!realBehaviorProofNeedsContributorNudge(options.markdown)) {
     return {

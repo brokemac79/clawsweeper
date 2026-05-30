@@ -10243,11 +10243,14 @@ function proofNudgeReport(overrides = {}) {
     reviewStatus: "complete",
     headSha: "abc123def456",
     reviewedAt: "2026-01-01T00:00:00Z",
+    itemCategory: "feature",
     pullFiles: JSON.stringify(["src/app.ts"]),
     proofStatus: "missing",
     evidenceKind: "none",
     needsContributorAction: "true",
     proofSummary: "The PR needs after-fix proof from a real setup.",
+    securityReviewStatus: "cleared",
+    securityReviewSummary: "No security-sensitive review is needed for this proof nudge.",
     ...overrides,
   };
   return `---
@@ -10258,6 +10261,7 @@ title: Proof nudge sample
 author: ${values.author}
 author_association: ${values.authorAssociation}
 labels: ${values.labels}
+item_category: ${values.itemCategory}
 review_status: ${values.reviewStatus}
 pull_files: ${values.pullFiles}
 pull_files_truncated: false
@@ -10274,6 +10278,12 @@ Evidence kind: ${values.evidenceKind}
 Needs contributor action: ${values.needsContributorAction}
 
 Summary: ${values.proofSummary}
+
+## Security Review
+
+Status: ${values.securityReviewStatus}
+
+Summary: ${values.securityReviewSummary}
 `;
 }
 
@@ -10532,6 +10542,32 @@ test("proof nudges skip maintainer, bot, security, and release PRs", () => {
       }).action,
       expected,
     );
+  }
+
+  for (const [markdown, expectedReason] of [
+    [
+      proofNudgeReport({
+        itemCategory: "security",
+      }),
+      "latest report item category is security",
+    ],
+    [
+      proofNudgeReport({
+        securityReviewStatus: "needs_attention",
+        securityReviewSummary: "The patch changes token handling and needs maintainer review.",
+      }),
+      "latest report security review needs attention",
+    ],
+  ] as const) {
+    const result = proofNudgeEligibilityForTest({
+      item: proofNudgeItem(),
+      markdown,
+      headSha: "abc123def456",
+      headCommittedAt: "2026-01-01T00:00:00Z",
+      now: Date.parse("2026-01-10T00:00:00Z"),
+    });
+    assert.equal(result.action, "skipped_protected_label");
+    assert.equal(result.reason, expectedReason);
   }
 });
 
