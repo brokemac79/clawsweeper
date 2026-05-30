@@ -11410,7 +11410,10 @@ test("proof nudge workflow is manual-first and scheduled behind repo vars", () =
   assert.match(job, /PROOF_NUDGES_LIMIT:/);
   assert.match(job, /PROOF_NUDGES_MIN_AGE_DAYS:/);
   assert.match(job, /PROOF_NUDGES_COOLDOWN_DAYS:/);
-  assert.match(job, /numeric_input in PROOF_NUDGES_LIMIT PROOF_NUDGES_MIN_AGE_DAYS PROOF_NUDGES_COOLDOWN_DAYS/);
+  assert.match(
+    job,
+    /numeric_input in PROOF_NUDGES_LIMIT PROOF_NUDGES_MIN_AGE_DAYS PROOF_NUDGES_COOLDOWN_DAYS/,
+  );
   assert.match(job, /execute_arg=\(\)/);
   assert.match(job, /if \[ "\$PROOF_NUDGES_EXECUTE" = "true" \]/);
   assert.match(job, /pnpm run proof-nudges/);
