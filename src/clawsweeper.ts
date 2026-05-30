@@ -756,6 +756,7 @@ interface ProofNudgeEligibilityOptions {
   comments?: readonly ProofNudgeComment[];
   headSha?: string | undefined;
   headCommittedAt?: string | undefined;
+  authorEditedAt?: string | undefined;
   now?: number;
   minAgeDays?: number;
   cooldownDays?: number;
@@ -9040,6 +9041,22 @@ function latestAuthorCommentAt(
   );
 }
 
+function latestAuthorPullRequestEditAt(
+  number: number,
+  author: string | undefined,
+): string | undefined {
+  const normalizedAuthor = author?.trim().toLowerCase();
+  if (!normalizedAuthor) return undefined;
+  return latestIsoTimestamp(
+    ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/timeline`)
+      .filter((event) => {
+        const record = asRecord(event);
+        return record.event === "edited" && login(record.actor)?.toLowerCase() === normalizedAuthor;
+      })
+      .map((event) => stringOrUndefined(asRecord(event).created_at)),
+  );
+}
+
 function latestProofNudgeAt(
   comments: readonly ProofNudgeComment[],
   options: { number: number; headSha: string },
@@ -9160,13 +9177,14 @@ function proofNudgeEligibility(options: ProofNudgeEligibilityOptions): ProofNudg
   }
   const latestActivityAt = latestIsoTimestamp([
     latestAuthorCommentAt(comments, options.item.author),
+    options.authorEditedAt,
     options.headCommittedAt,
   ]);
   if (latestActivityAt && !isOlderThanMs(latestActivityAt, minAgeMs, now)) {
     return {
       eligible: false,
       action: "skipped_recent_author_activity",
-      reason: `author comment or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
+      reason: `author comment, PR body edit, or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
       latestActivityAt,
     };
   }
@@ -13485,12 +13503,17 @@ function proofNudgesCommand(args: Args): void {
     const pullDetails =
       item.kind === "pull_request" ? fetchPullRequestProofNudgeDetails(candidate.number) : {};
     const comments = item.kind === "pull_request" ? proofNudgeComments(candidate.number) : [];
+    const authorEditedAt =
+      item.kind === "pull_request"
+        ? latestAuthorPullRequestEditAt(candidate.number, item.author)
+        : undefined;
     const eligibility = proofNudgeEligibility({
       item,
       markdown: candidate.markdown,
       comments,
       headSha: pullDetails.headSha,
       headCommittedAt: pullDetails.headCommittedAt,
+      authorEditedAt,
       minAgeDays,
       cooldownDays,
     });
