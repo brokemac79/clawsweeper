@@ -757,6 +757,7 @@ interface ProofNudgeEligibilityOptions {
   headSha?: string | undefined;
   headCommittedAt?: string | undefined;
   authorEditedAt?: string | undefined;
+  authorReviewActivityAt?: string | undefined;
   now?: number;
   minAgeDays?: number;
   cooldownDays?: number;
@@ -9057,6 +9058,27 @@ function latestAuthorPullRequestEditAt(
   );
 }
 
+function latestAuthorPullRequestReviewActivityAt(
+  number: number,
+  author: string | undefined,
+): string | undefined {
+  const normalizedAuthor = author?.trim().toLowerCase();
+  if (!normalizedAuthor) return undefined;
+  const reviewCommentActivity = ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/comments`)
+    .filter((comment) => login(asRecord(comment).user)?.toLowerCase() === normalizedAuthor)
+    .map((comment) => {
+      const record = asRecord(comment);
+      return stringOrUndefined(record.updated_at) ?? stringOrUndefined(record.created_at);
+    });
+  const submittedReviewActivity = ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/reviews`)
+    .filter((review) => login(asRecord(review).user)?.toLowerCase() === normalizedAuthor)
+    .map((review) => {
+      const record = asRecord(review);
+      return stringOrUndefined(record.submitted_at) ?? stringOrUndefined(record.submittedAt);
+    });
+  return latestIsoTimestamp([...reviewCommentActivity, ...submittedReviewActivity]);
+}
+
 function latestProofNudgeAt(
   comments: readonly ProofNudgeComment[],
   options: { number: number; headSha: string },
@@ -9178,13 +9200,14 @@ function proofNudgeEligibility(options: ProofNudgeEligibilityOptions): ProofNudg
   const latestActivityAt = latestIsoTimestamp([
     latestAuthorCommentAt(comments, options.item.author),
     options.authorEditedAt,
+    options.authorReviewActivityAt,
     options.headCommittedAt,
   ]);
   if (latestActivityAt && !isOlderThanMs(latestActivityAt, minAgeMs, now)) {
     return {
       eligible: false,
       action: "skipped_recent_author_activity",
-      reason: `author comment, PR body edit, or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
+      reason: `author comment, PR review activity, PR body edit, or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
       latestActivityAt,
     };
   }
@@ -13507,6 +13530,10 @@ function proofNudgesCommand(args: Args): void {
       item.kind === "pull_request"
         ? latestAuthorPullRequestEditAt(candidate.number, item.author)
         : undefined;
+    const authorReviewActivityAt =
+      item.kind === "pull_request"
+        ? latestAuthorPullRequestReviewActivityAt(candidate.number, item.author)
+        : undefined;
     const eligibility = proofNudgeEligibility({
       item,
       markdown: candidate.markdown,
@@ -13514,6 +13541,7 @@ function proofNudgesCommand(args: Args): void {
       headSha: pullDetails.headSha,
       headCommittedAt: pullDetails.headCommittedAt,
       authorEditedAt,
+      authorReviewActivityAt,
       minAgeDays,
       cooldownDays,
     });
