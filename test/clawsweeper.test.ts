@@ -10385,18 +10385,21 @@ test("proof nudges skip recent reviews and recent author activity", () => {
     }).action,
     "skipped_recent_author_activity",
   );
-  assert.equal(
-    proofNudgeEligibilityForTest({
-      item: proofNudgeItem({ updatedAt: "2026-01-09T00:00:00Z" }),
-      markdown: proofNudgeReport(),
-      headSha: "abc123def456",
-      headCommittedAt: "2026-01-01T00:00:00Z",
-      now: Date.parse("2026-01-10T00:00:00Z"),
-      minAgeDays: 5,
-      cooldownDays: 7,
-    }).action,
-    "skipped_recent_author_activity",
-  );
+  const maintainerActivity = proofNudgeEligibilityForTest({
+    item: proofNudgeItem({ updatedAt: "2026-01-09T00:00:00Z" }),
+    markdown: proofNudgeReport(),
+    comments: [
+      { author: "maintainer", body: "Queued for review.", updatedAt: "2026-01-09T00:00:00Z" },
+    ],
+    headSha: "abc123def456",
+    headCommittedAt: "2026-01-01T00:00:00Z",
+    now: Date.parse("2026-01-10T00:00:00Z"),
+    minAgeDays: 5,
+    cooldownDays: 7,
+  });
+
+  assert.equal(maintainerActivity.eligible, true);
+  assert.equal(maintainerActivity.action, "proof_nudge_planned");
 });
 
 test("proof nudges use same-head cooldown markers instead of label churn", () => {

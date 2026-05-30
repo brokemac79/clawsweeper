@@ -9160,14 +9160,13 @@ function proofNudgeEligibility(options: ProofNudgeEligibilityOptions): ProofNudg
   }
   const latestActivityAt = latestIsoTimestamp([
     latestAuthorCommentAt(comments, options.item.author),
-    options.item.updatedAt,
     options.headCommittedAt,
   ]);
   if (latestActivityAt && !isOlderThanMs(latestActivityAt, minAgeMs, now)) {
     return {
       eligible: false,
       action: "skipped_recent_author_activity",
-      reason: `author comment, PR update, or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
+      reason: `author comment or head commit is newer than ${options.minAgeDays ?? DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS} day(s)`,
       latestActivityAt,
     };
   }
