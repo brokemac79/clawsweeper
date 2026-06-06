@@ -16963,6 +16963,47 @@ test("ClawSweeper PR status labels use one current workflow status", () => {
   );
 });
 
+test("ClawSweeper PR status routes security owner acceptance to maintainer look", () => {
+  const ownerAcceptanceLabels = prStatusLabelsForTest([], {
+    proofStatus: "sufficient",
+    securityStatus: "needs_attention",
+    mergeRiskOptions: [{ category: "accept_risk", recommended: true }],
+    overallCorrectness: "patch is correct",
+  });
+
+  assert.equal(
+    ownerAcceptanceLabels.some((label) => label.endsWith("ready for maintainer look")),
+    true,
+  );
+  assert.equal(
+    ownerAcceptanceLabels.some((label) => label.endsWith("waiting on author")),
+    false,
+  );
+
+  const authorFixLabels = prStatusLabelsForTest([], {
+    proofStatus: "sufficient",
+    securityStatus: "needs_attention",
+    mergeRiskOptions: [{ category: "fix_before_merge", recommended: true }],
+    overallCorrectness: "patch is correct",
+  });
+
+  assert.equal(
+    authorFixLabels.some((label) => label.endsWith("waiting on author")),
+    true,
+  );
+
+  const ambiguousSecurityLabels = prStatusLabelsForTest([], {
+    proofStatus: "sufficient",
+    securityStatus: "needs_attention",
+    overallCorrectness: "patch is correct",
+  });
+
+  assert.equal(
+    ambiguousSecurityLabels.some((label) => label.endsWith("waiting on author")),
+    true,
+  );
+});
+
 test("ClawSweeper PR status labels preserve other label families", () => {
   assert.deepEqual(
     prStatusLabelsForTest(
