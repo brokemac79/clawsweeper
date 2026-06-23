@@ -93,6 +93,19 @@ pnpm run review:local -- \
   --codex-timeout-ms 600000
 ```
 
+PowerShell:
+
+```powershell
+pnpm run review:local -- `
+  --target-repo openclaw/openclaw `
+  --target-dir ../openclaw-clawsweeper-target `
+  --item-number <pr-number> `
+  --artifact-dir artifacts/local-review-<pr-number> `
+  --codex-model gpt-5.5 `
+  --codex-reasoning-effort high `
+  --codex-timeout-ms 600000
+```
+
 Read the report at:
 
 ```text

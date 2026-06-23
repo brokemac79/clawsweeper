@@ -566,6 +566,9 @@ pnpm run codex:local:check
 pnpm run review:local -- --target-repo openclaw/openclaw --target-dir ../openclaw --item-number 96157 --artifact-dir artifacts/local-review-96157 --codex-model gpt-5.5 --codex-reasoning-effort high --codex-timeout-ms 600000
 ```
 
+Use the PowerShell command form in the maintainer setup guide when running on
+Windows.
+
 `--local-only` skips the review-start placeholder comment, defaults the Codex
 service tier to `fast` for local CLI compatibility, and leaves generated output
 under the selected artifact directory. Do not run `apply-artifacts` or

@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const model = argValue("--model") ?? process.env.CLAWSWEEPER_LOCAL_CODEX_MODEL ?? "gpt-5.5";
-const codex = codexExecutable();
+const { codexSpawnInvocation } = await loadCodexLauncher();
+const codexEnv = { ...process.env, CLAWSWEEPER_PREFER_WINDOWS_CODEX_APP: "1" };
+const codex = codexInvocation([]);
 
-console.log(
-  `Codex binary: ${codex.command}${codex.argsPrefix.length ? ` ${codex.argsPrefix.join(" ")}` : ""}`,
-);
+console.log(`Codex binary: ${codex.command}${codex.args.length ? ` ${codex.args.join(" ")}` : ""}`);
 
 const status = runCodex(["login", "status", "-c", 'service_tier="fast"']);
 if (status.status !== 0) {
@@ -49,39 +46,37 @@ function argValue(name) {
   return value && !value.startsWith("--") ? value : undefined;
 }
 
-function codexExecutable() {
-  if (process.env.CODEX_BIN) return { command: process.env.CODEX_BIN, argsPrefix: [] };
-  if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-    const appBinary = join(localAppData, "OpenAI", "Codex", "bin", "codex.exe");
-    if (existsSync(appBinary)) return { command: appBinary, argsPrefix: [] };
-    const nodeShim = nodeShebangCodexOnPath();
-    if (nodeShim) return { command: process.execPath, argsPrefix: [nodeShim] };
+async function loadCodexLauncher() {
+  try {
+    return await import("../dist/codex-process.js");
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ERR_MODULE_NOT_FOUND"
+    ) {
+      console.error("Built Codex launcher module not found. Run `pnpm run build` and retry.");
+      process.exit(1);
+    }
+    throw error;
   }
-  return { command: "codex", argsPrefix: [] };
 }
 
-function nodeShebangCodexOnPath() {
-  for (const entry of (process.env.PATH ?? "").split(delimiter)) {
-    if (!entry) continue;
-    const candidate = join(entry, "codex");
-    if (!existsSync(candidate)) continue;
-    try {
-      const firstLine = readFileSync(candidate, "utf8").split(/\r?\n/, 1)[0] ?? "";
-      if (/^#!.*\bnode\b/i.test(firstLine)) return candidate;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+function codexInvocation(args) {
+  return codexSpawnInvocation(args, codexEnv, process.platform, process.cwd());
 }
 
 function runCodex(args, input = "") {
-  const result = spawnSync(codex.command, [...codex.argsPrefix, ...args], {
+  const invocation = codexInvocation(args);
+  const result = spawnSync(invocation.command, invocation.args, {
     encoding: "utf8",
+    env: codexEnv,
     input,
     maxBuffer: 8 * 1024 * 1024,
     timeout: 120_000,
+    windowsHide: true,
+    ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
   return {
     status: result.status,
