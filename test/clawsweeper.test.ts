@@ -12114,8 +12114,8 @@ test("runCodex preserves redacted process output when Codex exits without a deci
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
-process.stdout.write("startup banner GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\\n");
-process.stderr.write("Rate limit reached for model-test on tokens per min (TPM); OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456\\n");
+process.stdout.write("startup banner GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456 CODEX_ACCESS_TOKEN=codex-access-token-secret\\n");
+process.stderr.write("Rate limit reached for model-test on tokens per min (TPM); OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456 {\\"CODEX_ACCESS_TOKEN\\":\\"codex-json-token-secret\\"}\\n");
 process.exit(1);
 `,
   );
@@ -12149,10 +12149,14 @@ process.exit(1);
         assert.equal(reviewError.status, 1);
         assert.match(reviewError.stderr ?? "", /Rate limit reached/);
         assert.match(reviewError.stderr ?? "", /OPENAI_API_KEY=\[REDACTED\]/);
+        assert.match(reviewError.stderr ?? "", /"CODEX_ACCESS_TOKEN":"\[REDACTED\]"/);
         assert.doesNotMatch(reviewError.stderr ?? "", /sk-proj-/);
+        assert.doesNotMatch(reviewError.stderr ?? "", /codex-json-token-secret/);
         assert.match(reviewError.stdout ?? "", /startup banner/);
         assert.match(reviewError.stdout ?? "", /GH_TOKEN=\[REDACTED\]/);
+        assert.match(reviewError.stdout ?? "", /CODEX_ACCESS_TOKEN=\[REDACTED\]/);
         assert.doesNotMatch(reviewError.stdout ?? "", /ghp_/);
+        assert.doesNotMatch(reviewError.stdout ?? "", /codex-access-token-secret/);
         return true;
       },
     );
