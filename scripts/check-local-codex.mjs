@@ -7,7 +7,9 @@ import { spawnSync } from "node:child_process";
 const model = argValue("--model") ?? process.env.CLAWSWEEPER_LOCAL_CODEX_MODEL ?? "gpt-5.5";
 const codex = codexExecutable();
 
-console.log(`Codex binary: ${codex.command}${codex.argsPrefix.length ? ` ${codex.argsPrefix.join(" ")}` : ""}`);
+console.log(
+  `Codex binary: ${codex.command}${codex.argsPrefix.length ? ` ${codex.argsPrefix.join(" ")}` : ""}`,
+);
 
 const status = runCodex(["login", "status", "-c", 'service_tier="fast"']);
 if (status.status !== 0) {

@@ -51,6 +51,7 @@ import {
   reviewAutomationMarkersFromReport,
   reviewActionForDecision,
   reviewPriority,
+  reviewCodexForcedLoginMethodForTest,
   reviewPromptForTest,
   renderReviewCommentFromReport,
   renderReviewContextBudgetForTest,
@@ -12024,6 +12025,83 @@ process.exit(1);
   }
 });
 
+test("runCodex honors env login config unless preserving local Codex auth", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  const argsPath = join(root, "codex-args.json");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(2)));
+const outputIndex = process.argv.indexOf("--output-last-message");
+if (outputIndex === -1) process.exit(2);
+fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_ARGS_PATH: process.env.CODEX_ARGS_PATH,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+    CLAWSWEEPER_CODEX_LOGIN_METHOD: process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_ARGS_PATH = argsPath;
+  process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = "chatgpt";
+  process.env.CODEX_DECISION_JSON = JSON.stringify(
+    closeDecision({
+      decision: "keep_open",
+      closeReason: "none",
+      confidence: "medium",
+      summary: "Keep open for maintainer follow-up.",
+      bestSolution: "Review the routing invariant.",
+      closeComment: "",
+      workReason: "Maintainer review is required.",
+    }),
+  );
+
+  const runAndReadArgs = (preserveCodexAuth: boolean): string[] => {
+    const decision = runCodexForTest({
+      item: item({ number: 83395 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "model-test",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      preserveCodexAuth,
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+    assert.equal(decision.decision, "keep_open");
+    return JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+  };
+
+  try {
+    assert.ok(runAndReadArgs(false).includes('forced_login_method="chatgpt"'));
+    assert.equal(runAndReadArgs(true).includes('forced_login_method="chatgpt"'), false);
+    assert.equal(
+      runAndReadArgs(true).some((arg) => arg.startsWith("forced_login_method=")),
+      false,
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runCodex preserves redacted process output when Codex exits without a decision", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
@@ -14491,6 +14569,20 @@ test("Codex login method reads the environment without leaking test state", () =
     if (original === undefined) delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
     else process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = original;
   }
+});
+
+test("review command leaves Codex login method unset unless explicitly supplied", () => {
+  assert.equal(reviewCodexForcedLoginMethodForTest(parseClawsweeperArgs(["review"])), "");
+  assert.equal(
+    reviewCodexForcedLoginMethodForTest(parseClawsweeperArgs(["review", "--local-only"])),
+    "",
+  );
+  assert.equal(
+    reviewCodexForcedLoginMethodForTest(
+      parseClawsweeperArgs(["review", "--codex-forced-login-method", "chatgpt"]),
+    ),
+    "chatgpt",
+  );
 });
 
 test("Codex login method rejects invalid non-empty overrides", () => {

@@ -7067,6 +7067,14 @@ export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decisi
   return runCodex(options);
 }
 
+export function reviewCodexForcedLoginMethodForTest(args: Args): string {
+  return reviewCodexForcedLoginMethod(args);
+}
+
+function reviewCodexForcedLoginMethod(args: Args): string {
+  return stringArg(args.codex_forced_login_method, "");
+}
+
 function runCodex(options: {
   item: Item;
   context: ItemContext;
@@ -7117,10 +7125,7 @@ function runCodex(options: {
   );
   const startedAt = Date.now();
   const runReviewPass = (reasoningEffort: string, passAttempts: number): Decision => {
-    const codexConfig = [
-      `model_reasoning_effort="${reasoningEffort}"`,
-      'approval_policy="never"',
-    ];
+    const codexConfig = [`model_reasoning_effort="${reasoningEffort}"`, 'approval_policy="never"'];
     if (options.forcedLoginMethod) {
       codexConfig.splice(1, 0, `forced_login_method="${options.forcedLoginMethod}"`);
     } else if (!options.preserveCodexAuth) {
@@ -15779,7 +15784,7 @@ function reviewCommand(args: Args): void {
     : undefined;
   const readonlyOpenclaw = boolArg(args.readonly_openclaw);
   const skipStartComment = boolArg(args.skip_start_comment) || localOnly;
-  const forcedLoginMethod = stringArg(args.codex_forced_login_method, localOnly ? "" : "api");
+  const forcedLoginMethod = reviewCodexForcedLoginMethod(args);
   ensureDir(artifactDir);
   const git = gitInfo(openclawDir);
   const reviewPolicy = reviewPolicyHash({ model, reasoningEffort, sandboxMode, serviceTier });
