@@ -8,7 +8,12 @@ const codex = codexInvocation([]);
 
 console.log(`Codex binary: ${codex.command}${codex.args.length ? ` ${codex.args.join(" ")}` : ""}`);
 
-const status = runCodex(["login", "status", "-c", 'service_tier="fast"']);
+const status = runCodex("Checking Codex login status", [
+  "login",
+  "status",
+  "-c",
+  'service_tier="fast"',
+]);
 if (status.status !== 0) {
   console.error("Codex login status failed.");
   printTail(status);
@@ -17,6 +22,7 @@ if (status.status !== 0) {
 }
 
 const smoke = runCodex(
+  `Running Codex smoke test with ${model}`,
   [
     "exec",
     "-m",
@@ -67,8 +73,10 @@ function codexInvocation(args) {
   return codexSpawnInvocation(args, codexEnv, process.platform, process.cwd());
 }
 
-function runCodex(args, input = "") {
+function runCodex(label, args, input = "") {
   const invocation = codexInvocation(args);
+  const startedAt = Date.now();
+  console.log(`${label}...`);
   const result = spawnSync(invocation.command, invocation.args, {
     encoding: "utf8",
     env: codexEnv,
@@ -78,12 +86,17 @@ function runCodex(args, input = "") {
     windowsHide: true,
     ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
+  console.log(`${label} completed in ${formatElapsed(Date.now() - startedAt)}.`);
   return {
     status: result.status,
     error: result.error,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
+}
+
+function formatElapsed(milliseconds) {
+  return `${(milliseconds / 1000).toFixed(1)}s`;
 }
 
 function printTail(result) {
