@@ -43,7 +43,7 @@ function resolveCommand(command: string, args: string[]): { command: string; arg
 }
 
 function resolveExecutable(command: string): string {
-  return command === "git" ? (process.env.GIT_BIN ?? "/usr/bin/git") : command;
+  return command === "git" ? (process.env.GIT_BIN ?? "git") : command;
 }
 
 function envArgs(name: string): string[] {

@@ -7076,6 +7076,9 @@ function runCodex(options: {
   reasoningEffort: string;
   sandboxMode: string;
   serviceTier: string;
+  forcedLoginMethod?: string;
+  preserveCodexAuth?: boolean;
+  preferWindowsAppBinary?: boolean;
   timeoutMs: number;
   workDir: string;
   additionalPrompt?: string;
@@ -7116,9 +7119,13 @@ function runCodex(options: {
   const runReviewPass = (reasoningEffort: string, passAttempts: number): Decision => {
     const codexConfig = [
       `model_reasoning_effort="${reasoningEffort}"`,
-      codexLoginConfig(),
       'approval_policy="never"',
     ];
+    if (options.forcedLoginMethod) {
+      codexConfig.splice(1, 0, `forced_login_method="${options.forcedLoginMethod}"`);
+    } else if (!options.preserveCodexAuth) {
+      codexConfig.splice(1, 0, codexLoginConfig());
+    }
     if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
     for (let attempt = 1; attempt <= passAttempts; attempt += 1) {
       if (existsSync(outputPath)) unlinkSync(outputPath);
@@ -7150,8 +7157,12 @@ function runCodex(options: {
         ],
         cwd: options.openclawDir,
         env: {
-          ...codexEnv({ ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN }),
+          ...codexEnv({
+            ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
+            preserveCodexAuth: options.preserveCodexAuth,
+          }),
           CLAWSWEEPER_PROOF_SCRATCH_DIR: proofScratchDir,
+          ...(options.preferWindowsAppBinary ? { CLAWSWEEPER_PREFER_WINDOWS_CODEX_APP: "1" } : {}),
         },
         input: prompt,
         stderrPath: join(options.workDir, `${options.item.number}.${attempt}.codex.stderr.log`),
@@ -15751,7 +15762,8 @@ function reviewCommand(args: Args): void {
   const model = stringArg(args.codex_model, DEFAULT_CODEX_MODEL);
   const reasoningEffort = stringArg(args.codex_reasoning_effort, DEFAULT_REASONING_EFFORT);
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
-  const serviceTier = stringArg(args.codex_service_tier, DEFAULT_SERVICE_TIER);
+  const localOnly = boolArg(args.local_only);
+  const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
   const additionalPrompt = stringArg(
     args.additional_prompt,
@@ -15766,6 +15778,8 @@ function reviewCommand(args: Args): void {
     ? itemNumbersArg(args.item_numbers, undefined)
     : undefined;
   const readonlyOpenclaw = boolArg(args.readonly_openclaw);
+  const skipStartComment = boolArg(args.skip_start_comment) || localOnly;
+  const forcedLoginMethod = stringArg(args.codex_forced_login_method, localOnly ? "" : "api");
   ensureDir(artifactDir);
   const git = gitInfo(openclawDir);
   const reviewPolicy = reviewPolicyHash({ model, reasoningEffort, sandboxMode, serviceTier });
@@ -15810,23 +15824,29 @@ function reviewCommand(args: Args): void {
         mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
       );
       const snapshotHash = itemSnapshotHash(item, context);
-      try {
-        const startComment = postReviewStartStatusComment({
-          item,
-          position: completed + 1,
-          total: candidates.length,
-          shardIndex,
-          shardCount,
-        });
+      if (skipStartComment) {
         console.error(
-          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=${startComment} #${item.number}`,
+          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=skipped #${item.number}`,
         );
-      } catch (error) {
-        console.error(
-          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=failed #${item.number}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      } else {
+        try {
+          const startComment = postReviewStartStatusComment({
+            item,
+            position: completed + 1,
+            total: candidates.length,
+            shardIndex,
+            shardCount,
+          });
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=${startComment} #${item.number}`,
+          );
+        } catch (error) {
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=failed #${item.number}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
       let decision: Decision;
       let codexElapsedMs = 0;
@@ -15841,6 +15861,9 @@ function reviewCommand(args: Args): void {
           reasoningEffort,
           sandboxMode,
           serviceTier,
+          forcedLoginMethod,
+          preserveCodexAuth: localOnly,
+          preferWindowsAppBinary: localOnly,
           timeoutMs,
           workDir: codexWorkDir,
           additionalPrompt,

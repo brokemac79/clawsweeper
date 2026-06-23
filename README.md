@@ -553,6 +553,40 @@ pnpm run audit -- --target-repo openclaw/openclaw --max-pages 250 --sample-limit
 pnpm run reconcile -- --target-repo openclaw/openclaw --dry-run
 ```
 
+Exact local issue/PR review without posting the starter GitHub comment:
+
+For Codex users, the repo-local skill `$local-clawsweeper-review` wraps this
+as a pre-PR workflow with setup checks, target checkout hygiene, and artifact
+readout. Maintainer setup is documented in
+[`docs/local-clawsweeper-review.md`](docs/local-clawsweeper-review.md).
+
+```bash
+codex login --device-auth -c 'service_tier="fast"'
+pnpm run codex:local:check
+pnpm run review:local -- --target-repo openclaw/openclaw --target-dir ../openclaw --item-number 96157 --artifact-dir artifacts/local-review-96157 --codex-model gpt-5.5 --codex-reasoning-effort high --codex-timeout-ms 600000
+```
+
+`--local-only` skips the review-start placeholder comment, defaults the Codex
+service tier to `fast` for local CLI compatibility, and leaves generated output
+under the selected artifact directory. Do not run `apply-artifacts` or
+`apply-decisions` unless you intentionally want to move reports into durable
+state or sync GitHub comments.
+
+If you prefer API-key auth, keep the key out of the repository and shell
+history. For PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key"
+$env:OPENAI_API_KEY | codex login --with-api-key -c 'service_tier="fast"'
+Remove-Item Env:OPENAI_API_KEY
+```
+
+`review:local` preserves local Codex auth environment variables only for
+local-only review runs. Normal production review workers still strip Codex,
+OpenAI, and GitHub write credentials before invoking the model. Set `CODEX_BIN`
+to an absolute executable path if the desired Codex CLI is not the first
+spawnable binary on `PATH`.
+
 Apply unchanged proposals later:
 
 ```bash
