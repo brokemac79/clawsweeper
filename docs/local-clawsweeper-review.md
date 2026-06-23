@@ -106,6 +106,10 @@ pnpm run review:local -- \
   --target-dir ../openclaw-clawsweeper-target
 ```
 
+The exact local command prints a maintainer-oriented progress summary by
+default. Add `--verbose` when debugging checkout, selection, or Codex process
+details.
+
 Read the report at:
 
 ```text
@@ -267,6 +271,10 @@ pnpm run review:local -- \
   --item-number <pr-number> \
   --target-dir <target-dir>
 ```
+
+The exact local command prints a maintainer-oriented progress summary by
+default. Add `--verbose` when debugging checkout, selection, or Codex process
+details.
 
 ## Readout
 

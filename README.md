@@ -578,7 +578,8 @@ or to review an issue, pass `--target-dir <path>`; the default artifact
 directory still stays `artifacts/local-review-<number>`. Do not run
 `apply-artifacts` or
 `apply-decisions` unless you intentionally want to move reports into durable
-state or sync GitHub comments.
+state or sync GitHub comments. Add `--verbose` to `review:local` when you need
+the underlying `[review]` diagnostic logs.
 
 If you prefer API-key auth, keep the key out of the repository and shell
 history. For PowerShell:

@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -135,6 +143,93 @@ test("managed local review checkout fetches the pull request ref", () => {
     );
     assert.ok(existsSync(join(targetDir, "feature.txt")));
     assert.equal(readFileSync(join(targetDir, "feature.txt"), "utf8"), "from pr\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local exact review explains when GitHub item is not open", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmd-"));
+  const origin = join(root, "origin.git");
+  const targetDir = join(root, "target");
+  const artifactDir = join(root, "artifacts");
+  const binDir = join(root, "bin");
+  try {
+    execFileSync("git", ["init", "--bare", origin], { stdio: "ignore" });
+    execFileSync("git", ["init", targetDir], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "clawsweeper@example.com"], { cwd: targetDir });
+    execFileSync("git", ["config", "user.name", "ClawSweeper Test"], { cwd: targetDir });
+    writeFileSync(join(targetDir, "README.md"), "base\n");
+    execFileSync("git", ["add", "README.md"], { cwd: targetDir });
+    execFileSync("git", ["commit", "-m", "base"], { cwd: targetDir, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: targetDir });
+    execFileSync("git", ["remote", "add", "origin", origin], { cwd: targetDir });
+    execFileSync("git", ["push", "origin", "main"], { cwd: targetDir, stdio: "ignore" });
+
+    mkdirSync(binDir);
+    const ghPath = join(binDir, "gh");
+    writeFileSync(
+      ghPath,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "api" && args[1] === "repos/openclaw/openclaw/issues/357") {
+  console.log(JSON.stringify({
+    number: 357,
+    title: "Closed local review test",
+    html_url: "https://github.com/openclaw/openclaw/pull/357",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+    closed_at: "2026-01-03T00:00:00Z",
+    state: "closed",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "author" },
+    labels: [],
+    pull_request: {}
+  }));
+  process.exit(0);
+}
+if (args[0] === "api" && args[1] === "repos/openclaw/openclaw/pulls/357") {
+  process.exit(1);
+}
+if (args[0] === "release" && args[1] === "view") {
+  process.exit(1);
+}
+console.error("unexpected gh args " + JSON.stringify(args));
+process.exit(1);
+`,
+    );
+    chmodSync(ghPath, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "review",
+        "--local-only",
+        "--target-dir",
+        targetDir,
+        "--item-number",
+        "357",
+        "--artifact-dir",
+        artifactDir,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Local ClawSweeper review for openclaw\/openclaw#357/);
+    assert.match(result.stderr, /Preparing target checkout/);
+    assert.match(result.stderr, /mode: supplied checkout/);
+    assert.match(result.stderr, /Loading review item/);
+    assert.match(result.stderr, /Error: No review was run for openclaw\/openclaw#357/);
+    assert.match(result.stderr, /GitHub reports this PR is closed/);
+    assert.doesNotMatch(result.stderr, /selected=0/);
+    assert.doesNotMatch(result.stderr, /\n\s+at /);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

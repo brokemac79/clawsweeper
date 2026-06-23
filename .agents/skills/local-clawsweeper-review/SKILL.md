@@ -116,6 +116,10 @@ pnpm run review:local -- \
   --target-dir <target-dir>
 ```
 
+The exact local command prints a maintainer-oriented progress summary by
+default. Add `--verbose` only when debugging checkout, selection, or Codex
+process details.
+
 For quick smoke tests, lower `--batch-size`, `--shard-count`, `--max-pages`, and
 `--codex-timeout-ms`, but label the result as a smoke run rather than a full
 local review.

@@ -5931,6 +5931,36 @@ function selectCandidates(options: {
   return { candidates, scannedPages };
 }
 
+function exactLocalReviewNoCandidateError(
+  itemNumber: number | undefined,
+  shardIndex: number,
+): UserFacingCommandError {
+  if (itemNumber === undefined) {
+    return new UserFacingCommandError("No review was run because no item number was provided.");
+  }
+  if (shardIndex !== 0) {
+    return new UserFacingCommandError(
+      `No review was run for ${targetRepo()}#${itemNumber} because exact item reviews only run on shard 0. Remove --shard-index for local reviews.`,
+    );
+  }
+  try {
+    const { item, state } = fetchItem(itemNumber);
+    if (state !== "open") {
+      return new UserFacingCommandError(
+        `No review was run for ${targetRepo()}#${itemNumber} because GitHub reports this ${item.kind === "pull_request" ? "PR" : "issue"} is ${state}. Local exact review only reviews open items.`,
+      );
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return new UserFacingCommandError(
+      `No review was run for ${targetRepo()}#${itemNumber} because the item could not be loaded from GitHub. If this is a different repository, pass --target-repo owner/name. ${reason}`,
+    );
+  }
+  return new UserFacingCommandError(
+    `No review was run for ${targetRepo()}#${itemNumber}. The item was not selected for review.`,
+  );
+}
+
 function openExplicitItems(itemNumbers: readonly number[]): Item[] {
   const seen = new Set<number>();
   const candidates: Item[] = [];
@@ -6454,6 +6484,7 @@ function tryLocalPullBaseBranch(itemNumber: number): string | undefined {
 }
 
 type ReviewCheckout = {
+  mode: "managed" | "supplied" | "default";
   openclawDir: string;
   gitTargetBranch?: string;
 };
@@ -6484,33 +6515,53 @@ function defaultReviewArtifactDir(
 function resolveReviewCheckout(options: {
   args: Args;
   artifactDir: string;
+  humanLocalReview?: boolean;
   itemNumber: number | undefined;
   itemNumbers: number[] | undefined;
   localOnly: boolean;
   profile: RepositoryProfile;
+  verbose?: boolean;
 }): ReviewCheckout {
-  const { args, artifactDir, itemNumber, itemNumbers, localOnly, profile } = options;
+  const { args, artifactDir, humanLocalReview, itemNumber, itemNumbers, localOnly, profile } =
+    options;
   const explicitTargetDir = hasExplicitReviewTargetDir(args);
   if (localExactReviewItem(localOnly, itemNumber, itemNumbers) && !explicitTargetDir) {
     const pull = localPullMetadata(itemNumber);
     const openclawDir = join(artifactDir, "target");
+    if (humanLocalReview) {
+      console.error("  mode: managed PR checkout");
+      console.error(`  path: ${displayPath(openclawDir)}`);
+      console.error(`  base: ${pull.baseRef}`);
+    }
     prepareManagedLocalReviewCheckout({
       baseBranch: pull.baseRef,
       itemNumber,
       targetDir: openclawDir,
       targetRepo: targetRepo(),
+      verbose: options.verbose,
     });
-    return { openclawDir, gitTargetBranch: pull.baseRef };
+    return { mode: "managed", openclawDir, gitTargetBranch: pull.baseRef };
   }
 
   const openclawDir = resolve(
     stringArg(args.target_dir, stringArg(args.openclaw_dir, `../${profile.checkoutDir}`)),
   );
+  if (humanLocalReview) {
+    console.error(`  mode: ${explicitTargetDir ? "supplied checkout" : "default checkout"}`);
+    console.error(`  path: ${displayPath(openclawDir)}`);
+  }
   if (localExactReviewItem(localOnly, itemNumber, itemNumbers)) {
     const baseBranch = tryLocalPullBaseBranch(itemNumber);
-    if (baseBranch) return { openclawDir, gitTargetBranch: baseBranch };
+    if (baseBranch) {
+      if (humanLocalReview) console.error(`  base: ${baseBranch}`);
+      return {
+        mode: explicitTargetDir ? "supplied" : "default",
+        openclawDir,
+        gitTargetBranch: baseBranch,
+      };
+    }
   }
-  return { openclawDir };
+  return { mode: explicitTargetDir ? "supplied" : "default", openclawDir };
 }
 
 type ManagedLocalReviewCheckoutOptions = {
@@ -6519,10 +6570,11 @@ type ManagedLocalReviewCheckoutOptions = {
   itemNumber: number;
   targetDir: string;
   targetRepo: string;
+  verbose?: boolean | undefined;
 };
 
 function prepareManagedLocalReviewCheckout(options: ManagedLocalReviewCheckoutOptions): void {
-  const { baseBranch, cloneUrl, itemNumber, targetDir, targetRepo } = options;
+  const { baseBranch, cloneUrl, itemNumber, targetDir, targetRepo, verbose } = options;
   const remoteUrl = cloneUrl ?? githubCloneUrl(targetRepo);
   ensureDir(dirname(targetDir));
   const targetExists = existsSync(targetDir);
@@ -6542,9 +6594,11 @@ function prepareManagedLocalReviewCheckout(options: ManagedLocalReviewCheckoutOp
   }
 
   const branch = `clawsweeper/pr-${itemNumber}`;
-  console.error(
-    `[review] ${new Date().toISOString()} local-checkout=managed target=${targetDir} pr=#${itemNumber} base=${baseBranch}`,
-  );
+  if (verbose) {
+    console.error(
+      `[review] ${new Date().toISOString()} local-checkout=managed target=${targetDir} pr=#${itemNumber} base=${baseBranch}`,
+    );
+  }
   run("git", ["fetch", "--force", "origin", `refs/pull/${itemNumber}/head`, "--depth=50"], {
     cwd: targetDir,
   });
@@ -6569,6 +6623,12 @@ function ensureGitOriginRemote(dir: string, remoteUrl: string): void {
   } catch {
     run("git", ["remote", "add", "origin", remoteUrl], { cwd: dir });
   }
+}
+
+function displayPath(path: string): string {
+  const relativePath = relative(process.cwd(), path);
+  if (!relativePath) return ".";
+  return relativePath.startsWith("..") ? path : relativePath;
 }
 
 export function defaultReviewArtifactDirForTest(
@@ -7265,6 +7325,7 @@ function runCodex(options: {
   additionalPrompt?: string;
   proofScratchDir?: string;
   prompt?: string;
+  quietLogs?: boolean;
 }): Decision {
   ensureDir(options.workDir);
   const proofScratchDir =
@@ -7368,11 +7429,13 @@ function runCodex(options: {
             options.item,
           );
           if (result.status !== 0) {
-            console.error(
-              `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
-                options.item.number
-              } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
-            );
+            if (!options.quietLogs) {
+              console.error(
+                `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
+                  options.item.number
+                } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
+              );
+            }
           }
           return decision;
         } catch (error) {
@@ -7403,11 +7466,13 @@ function runCodex(options: {
       if (retryable && attempt < passAttempts) {
         const delayMs = codexRetryDelayMs(processFailureDetail, attempt);
         if (Date.now() - startedAt + delayMs < options.timeoutMs) {
-          console.error(
-            `[review] ${new Date().toISOString()} codex-retry #${options.item.number} attempt=${
-              attempt + 1
-            }/${passAttempts} delay_ms=${delayMs} reason=transient_transport`,
-          );
+          if (!options.quietLogs) {
+            console.error(
+              `[review] ${new Date().toISOString()} codex-retry #${options.item.number} attempt=${
+                attempt + 1
+              }/${passAttempts} delay_ms=${delayMs} reason=transient_transport`,
+            );
+          }
           sleepMs(delayMs);
           continue;
         }
@@ -7436,9 +7501,11 @@ function runCodex(options: {
     const fallbackEffort = lowerCodexReasoningEffort(options.reasoningEffort);
     const remainingMs = options.timeoutMs - (Date.now() - startedAt);
     if (fallbackEffort === null || remainingMs < codexFallbackMinBudgetMs()) throw error;
-    console.error(
-      `[review] ${new Date().toISOString()} codex-fallback #${options.item.number} reason=transient_transport from_effort=${options.reasoningEffort} to_effort=${fallbackEffort} remaining_ms=${remainingMs}`,
-    );
+    if (!options.quietLogs) {
+      console.error(
+        `[review] ${new Date().toISOString()} codex-fallback #${options.item.number} reason=transient_transport from_effort=${options.reasoningEffort} to_effort=${fallbackEffort} remaining_ms=${remainingMs}`,
+      );
+    }
     try {
       const decision = runReviewPass(fallbackEffort, 1);
       return annotateDegradedReview(decision, {
@@ -15931,21 +15998,31 @@ function planCommand(args: Args): void {
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
   const localOnly = boolArg(args.local_only);
+  const verbose = boolArg(args.verbose);
   const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
   const itemNumbers = hasItemNumbersInput
     ? itemNumbersArg(args.item_numbers, undefined)
     : undefined;
+  const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
+  const humanLocalReview = localExactItem && !verbose;
   const artifactDir = resolve(
     stringArg(args.artifact_dir, defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers)),
   );
+  if (humanLocalReview) {
+    console.error(`Local ClawSweeper review for ${targetRepo()}#${itemNumber}`);
+    console.error("");
+    console.error("Preparing target checkout");
+  }
   const checkout = resolveReviewCheckout({
     args,
     artifactDir,
+    humanLocalReview,
     itemNumber,
     itemNumbers,
     localOnly,
     profile,
+    verbose,
   });
   const openclawDir = checkout.openclawDir;
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
@@ -15984,10 +16061,22 @@ function reviewCommand(args: Args): void {
     if (itemNumber) selectionOptions.itemNumber = itemNumber;
     if (itemNumbers) selectionOptions.itemNumbers = itemNumbers;
     if (hotIntake) selectionOptions.hotIntake = true;
+    if (humanLocalReview) {
+      console.error("");
+      console.error("Loading review item");
+    }
     const { candidates, scannedPages } = selectCandidates(selectionOptions);
-    console.error(
-      `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} selected=${candidates.length} scanned_pages=${scannedPages}`,
-    );
+    if (humanLocalReview) {
+      if (candidates.length === 0) throw exactLocalReviewNoCandidateError(itemNumber, shardIndex);
+      const item = candidates[0]!;
+      console.error(`  item: ${item.kind === "pull_request" ? "PR" : "issue"} #${item.number}`);
+      console.error(`  title: ${item.title}`);
+      console.error("  state: open");
+    } else {
+      console.error(
+        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} selected=${candidates.length} scanned_pages=${scannedPages}`,
+      );
+    }
     writeFileSync(
       join(artifactDir, "selection.json"),
       JSON.stringify({ shardIndex, shardCount, scannedPages, candidates, reviewPolicy }, null, 2),
@@ -15995,9 +16084,14 @@ function reviewCommand(args: Args): void {
     let completed = 0;
     let codexFailures = 0;
     for (const item of candidates) {
-      console.error(
-        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start #${item.number} (${completed + 1}/${candidates.length})`,
-      );
+      if (humanLocalReview) {
+        console.error("");
+        console.error("Collecting GitHub context");
+      } else {
+        console.error(
+          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start #${item.number} (${completed + 1}/${candidates.length})`,
+        );
+      }
       const contextStartedAt = Date.now();
       const context = collectItemContext(item);
       const contextElapsedMs = Date.now() - contextStartedAt;
@@ -16013,9 +16107,11 @@ function reviewCommand(args: Args): void {
       );
       const snapshotHash = itemSnapshotHash(item, context);
       if (skipStartComment) {
-        console.error(
-          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=skipped #${item.number}`,
-        );
+        if (!humanLocalReview) {
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=skipped #${item.number}`,
+          );
+        }
       } else {
         try {
           const startComment = postReviewStartStatusComment({
@@ -16040,6 +16136,10 @@ function reviewCommand(args: Args): void {
       let codexElapsedMs = 0;
       const codexStartedAt = Date.now();
       try {
+        if (humanLocalReview) {
+          console.error("");
+          console.error("Running Codex review");
+        }
         decision = runCodex({
           item,
           context,
@@ -16057,6 +16157,7 @@ function reviewCommand(args: Args): void {
           additionalPrompt,
           proofScratchDir,
           prompt: prompt.text,
+          quietLogs: humanLocalReview,
         });
       } catch (error) {
         codexFailures += 1;
@@ -16086,8 +16187,9 @@ function reviewCommand(args: Args): void {
         codexElapsedMs,
       };
       const action = reviewActionForDecision({ item, decision, git, runtime });
+      const reportPath = join(artifactDir, reportFileName(item.repo, item.number));
       writeFileSync(
-        join(artifactDir, reportFileName(item.repo, item.number)),
+        reportPath,
         markdownFor({
           item,
           context,
@@ -16102,13 +16204,24 @@ function reviewCommand(args: Args): void {
         "utf8",
       );
       completed += 1;
+      if (humanLocalReview) {
+        console.error("");
+        console.error("Review complete");
+        console.error(`  decision: ${decision.decision}`);
+        console.error(`  confidence: ${decision.confidence}`);
+        console.error(`  action: ${action.actionTaken}`);
+        console.error(`  report: ${displayPath(reportPath)}`);
+      } else {
+        console.error(
+          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} done #${item.number} (${completed}/${candidates.length}) decision=${decision.decision} confidence=${decision.confidence} action=${action.actionTaken}`,
+        );
+      }
+    }
+    if (!humanLocalReview) {
       console.error(
-        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} done #${item.number} (${completed}/${candidates.length}) decision=${decision.decision} confidence=${decision.confidence} action=${action.actionTaken}`,
+        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} complete reviewed=${completed}`,
       );
     }
-    console.error(
-      `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} complete reviewed=${completed}`,
-    );
     if (codexFailures > 0) {
       throw new Error(
         `Codex failed for ${codexFailures} item${codexFailures === 1 ? "" : "s"}; review artifacts were written and the workflow recovery lane can requeue the planned set.`,
