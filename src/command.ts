@@ -9,6 +9,17 @@ export type RunTextOptions = {
   trim?: "both" | "end" | "none";
 };
 
+export class UserFacingCommandError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UserFacingCommandError";
+  }
+}
+
+export function isUserFacingCommandError(error: unknown): error is UserFacingCommandError {
+  return error instanceof UserFacingCommandError;
+}
+
 export function runText(
   command: string,
   args: string[],
@@ -41,11 +52,11 @@ export function runText(
 function explainSpawnFailure(error: unknown, command: string, cwd?: string): unknown {
   if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
     if (cwd && !existsSync(cwd)) {
-      return new Error(
+      return new UserFacingCommandError(
         `Working directory not found while running ${command}: ${cwd}. Check --target-dir or create the checkout first.`,
       );
     }
-    return new Error(
+    return new UserFacingCommandError(
       `Command not found while running ${command}. Ensure ${command} is installed and available on PATH, or set the appropriate *_BIN override.`,
     );
   }

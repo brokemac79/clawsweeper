@@ -50,7 +50,7 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
-import { runText } from "./command.js";
+import { isUserFacingCommandError, runText } from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
   buildOpenClawPrSurfaceStats,
@@ -19543,7 +19543,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    console.error(formatFatalError(error));
     process.exit(1);
   });
+}
+
+function formatFatalError(error: unknown): string {
+  if (isUserFacingCommandError(error)) return `Error: ${error.message}`;
+  return error instanceof Error ? error.stack || error.message : String(error);
 }
