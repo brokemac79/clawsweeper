@@ -59,10 +59,15 @@ unset OPENAI_API_KEY
 pnpm run codex:local:check
 ```
 
-## Target Checkout
+## Target Checkout Modes
 
-Use a clean checkout of the repository being reviewed. A dedicated target
-checkout avoids interfering with normal development work:
+By default, an exact local PR review manages its own target checkout. With
+`--item-number <pr-number>` and no `--target-dir`, ClawSweeper clones the PR ref
+under `artifacts/local-review-<pr-number>/target` and reviews that checkout.
+
+To review an already-cloned checkout, or to review an issue, pass
+`--target-dir`. Use a clean checkout of the repository being reviewed. A
+dedicated target checkout avoids interfering with normal development work:
 
 ```sh
 git clone https://github.com/openclaw/openclaw.git ../openclaw-clawsweeper-target
@@ -72,7 +77,8 @@ git -C ../openclaw-clawsweeper-target switch main
 git -C ../openclaw-clawsweeper-target pull --ff-only origin main
 ```
 
-Do not switch branches, pull, or overwrite files in a dirty target checkout.
+Do not switch branches, pull, or overwrite files in a dirty supplied target
+checkout.
 
 ## Run A PR Review
 
@@ -83,27 +89,21 @@ one PR and avoid shell argument parsing surprises.
 From the ClawSweeper checkout:
 
 ```sh
-pnpm run review:local -- \
-  --target-repo openclaw/openclaw \
-  --target-dir ../openclaw-clawsweeper-target \
-  --item-number <pr-number> \
-  --artifact-dir artifacts/local-review-<pr-number> \
-  --codex-model gpt-5.5 \
-  --codex-reasoning-effort high \
-  --codex-timeout-ms 600000
+pnpm run review:local -- --item-number <pr-number>
 ```
 
 PowerShell:
 
 ```powershell
-pnpm run review:local -- `
-  --target-repo openclaw/openclaw `
-  --target-dir ../openclaw-clawsweeper-target `
-  --item-number <pr-number> `
-  --artifact-dir artifacts/local-review-<pr-number> `
-  --codex-model gpt-5.5 `
-  --codex-reasoning-effort high `
-  --codex-timeout-ms 600000
+pnpm run review:local -- --item-number <pr-number>
+```
+
+To use a supplied checkout instead:
+
+```sh
+pnpm run review:local -- \
+  --item-number <pr-number> \
+  --target-dir ../openclaw-clawsweeper-target
 ```
 
 Read the report at:
@@ -174,17 +174,17 @@ Bootstrap prompt:
 ```text
 Follow docs/local-clawsweeper-review.md. Clone openclaw/clawsweeper if needed,
 copy the shipped .agents/skills/local-clawsweeper-review skill into my Codex
-user skills directory, authenticate my own gh and Codex CLI, prepare a clean
-OpenClaw target checkout, then run one local ClawSweeper review at a time.
+user skills directory, authenticate my own gh and Codex CLI, then run one local
+ClawSweeper review at a time.
 ```
 
 Fallback skill creation prompt:
 
 ```text
 Create a Codex skill named local-clawsweeper-review. Its workflow is:
-use a clean ClawSweeper checkout, run pnpm run codex:local:check, prepare a
-clean OpenClaw target checkout, run pnpm run review:local with --item-number
-for one PR at a time, read artifacts/local-review-<pr>/<pr>.md, summarize
+use a clean ClawSweeper checkout, run pnpm run codex:local:check, run
+pnpm run review:local with --item-number for one PR at a time, read
+artifacts/local-review-<pr>/<pr>.md, summarize
 review_status/main_sha/pull_head_sha/decision/confidence/findings, and do not
 post GitHub comments or run apply/repair/merge commands unless explicitly asked.
 ```
@@ -235,9 +235,13 @@ codex login --device-auth -c 'service_tier="fast"'
 pnpm run codex:local:check
 ```
 
-## Target Checkout
+## Target Checkout Modes
 
-Use a clean target checkout. For OpenClaw:
+By default, an exact local PR review manages its own target checkout under
+`artifacts/local-review-<pr-number>/target`.
+
+Pass `--target-dir` when the operator wants to review an existing checkout or
+an issue. Use a clean supplied target checkout. For OpenClaw:
 
 ```sh
 git -C <target-dir> status --short
@@ -253,14 +257,15 @@ Do not switch, pull, or overwrite a dirty target checkout.
 From the ClawSweeper checkout:
 
 ```sh
+pnpm run review:local -- --item-number <pr-number>
+```
+
+To use a supplied checkout:
+
+```sh
 pnpm run review:local -- \
-  --target-repo openclaw/openclaw \
-  --target-dir <target-dir> \
   --item-number <pr-number> \
-  --artifact-dir artifacts/local-review-<pr-number> \
-  --codex-model gpt-5.5 \
-  --codex-reasoning-effort high \
-  --codex-timeout-ms 600000
+  --target-dir <target-dir>
 ```
 
 ## Readout
@@ -276,7 +281,7 @@ Read `artifacts/local-review-<pr-number>/<pr-number>.md` and summarize:
 - exact auth/runtime failure if the run failed
 
 Before reporting success, confirm `review:local` or `--local-only` was used and
-the target checkout stayed clean.
+any supplied target checkout stayed clean.
 ````
 
 Optionally write `agents/openai.yaml`:
@@ -303,7 +308,7 @@ Maintainers can run an advisory local ClawSweeper review before asking the
 hosted bot to re-review a PR. Clone `openclaw/clawsweeper`, follow
 `docs/local-clawsweeper-review.md`, authenticate your own Codex CLI with
 `codex login --device-auth -c 'service_tier="fast"'`, and run
-`pnpm run review:local` against a clean OpenClaw checkout.
+`pnpm run review:local -- --item-number <pr-number>`.
 
 Local output is for maintainer triage only. It does not replace hosted
 ClawSweeper checks, GitHub comments, merge gates, or automerge approval.

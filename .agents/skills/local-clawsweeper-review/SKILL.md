@@ -70,7 +70,13 @@ If the wrong Codex binary is used, set `CODEX_BIN` in the local shell for that
 run. On Windows, the runner prefers the Codex app binary under
 `%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe` when `--local-only` is used.
 
-## Prepare Target Checkout
+## Target Checkout Modes
+
+By default, an exact local PR review manages its own target checkout under
+`artifacts/local-review-<pr-number>/target`.
+
+Pass `--target-dir` when the operator wants to review an existing checkout or
+an issue.
 
 Use a clean target checkout of the repository being reviewed. For OpenClaw,
 prefer a dedicated review checkout if the normal worktree is dirty:
@@ -99,14 +105,15 @@ it.
 From the ClawSweeper checkout:
 
 ```sh
+pnpm run review:local -- --item-number <pr-number>
+```
+
+To use a supplied checkout or review an issue:
+
+```sh
 pnpm run review:local -- \
-  --target-repo openclaw/openclaw \
-  --target-dir <target-dir> \
   --item-number <issue-or-pr-number> \
-  --artifact-dir artifacts/local-review-<issue-or-pr-number> \
-  --codex-model gpt-5.5 \
-  --codex-reasoning-effort high \
-  --codex-timeout-ms 600000
+  --target-dir <target-dir>
 ```
 
 For quick smoke tests, lower `--batch-size`, `--shard-count`, `--max-pages`, and

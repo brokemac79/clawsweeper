@@ -50,7 +50,7 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
-import { isUserFacingCommandError, runText } from "./command.js";
+import { isUserFacingCommandError, runText, UserFacingCommandError } from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
   buildOpenClawPrSurfaceStats,
@@ -6368,8 +6368,13 @@ function collectItemContext(
   return context;
 }
 
-function gitInfo(openclawDir: string): GitInfo {
-  const targetBranch = reviewTargetBranch(openclawDir);
+type ReviewGitInfoOptions = {
+  targetBranch?: string;
+};
+
+function gitInfo(openclawDir: string, options: ReviewGitInfoOptions = {}): GitInfo {
+  const targetBranch = options.targetBranch ?? reviewTargetBranch(openclawDir);
+  requireSafeGitBranchName(targetBranch, "target branch");
   run(
     "git",
     ["fetch", "origin", `${targetBranch}:refs/remotes/origin/${targetBranch}`, "--depth=50"],
@@ -6408,8 +6413,176 @@ function gitInfo(openclawDir: string): GitInfo {
 
 function reviewTargetBranch(openclawDir: string): string {
   const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: openclawDir });
-  if (/^[A-Za-z0-9_./-]+$/.test(branch) && branch !== "HEAD") return branch;
+  if (isSafeGitBranchName(branch) && branch !== "HEAD") return branch;
   return "main";
+}
+
+function isSafeGitBranchName(branch: string): boolean {
+  return /^[A-Za-z0-9_./-]+$/.test(branch) && !branch.startsWith("-");
+}
+
+function requireSafeGitBranchName(branch: string, label: string): string {
+  if (isSafeGitBranchName(branch) && branch !== "HEAD") return branch;
+  throw new UserFacingCommandError(`Invalid ${label}: ${branch}`);
+}
+
+type LocalPullMetadata = {
+  baseRef: string;
+};
+
+function localPullMetadata(itemNumber: number): LocalPullMetadata {
+  try {
+    const pull = asRecord(ghJson<unknown>(["api", `repos/${targetRepo()}/pulls/${itemNumber}`]));
+    const baseRef = stringOrUndefined(asRecord(pull.base).ref);
+    if (!baseRef) throw new Error("pull request base ref was missing");
+    return { baseRef: requireSafeGitBranchName(baseRef, "pull request base branch") };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new UserFacingCommandError(
+      `Could not load pull request #${itemNumber} from ${targetRepo()} for managed local checkout. ` +
+        `Pass --target-dir to review an existing checkout. ${reason}`,
+    );
+  }
+}
+
+function tryLocalPullBaseBranch(itemNumber: number): string | undefined {
+  try {
+    return localPullMetadata(itemNumber).baseRef;
+  } catch {
+    return undefined;
+  }
+}
+
+type ReviewCheckout = {
+  openclawDir: string;
+  gitTargetBranch?: string;
+};
+
+function hasExplicitReviewTargetDir(args: Args): boolean {
+  return typeof args.target_dir === "string" || typeof args.openclaw_dir === "string";
+}
+
+function localExactReviewItem(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): itemNumber is number {
+  return localOnly && itemNumber !== undefined && itemNumbers === undefined;
+}
+
+function defaultReviewArtifactDir(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): string {
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers)) {
+    return `artifacts/local-review-${itemNumber}`;
+  }
+  return "artifacts/reviews";
+}
+
+function resolveReviewCheckout(options: {
+  args: Args;
+  artifactDir: string;
+  itemNumber: number | undefined;
+  itemNumbers: number[] | undefined;
+  localOnly: boolean;
+  profile: RepositoryProfile;
+}): ReviewCheckout {
+  const { args, artifactDir, itemNumber, itemNumbers, localOnly, profile } = options;
+  const explicitTargetDir = hasExplicitReviewTargetDir(args);
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers) && !explicitTargetDir) {
+    const pull = localPullMetadata(itemNumber);
+    const openclawDir = join(artifactDir, "target");
+    prepareManagedLocalReviewCheckout({
+      baseBranch: pull.baseRef,
+      itemNumber,
+      targetDir: openclawDir,
+      targetRepo: targetRepo(),
+    });
+    return { openclawDir, gitTargetBranch: pull.baseRef };
+  }
+
+  const openclawDir = resolve(
+    stringArg(args.target_dir, stringArg(args.openclaw_dir, `../${profile.checkoutDir}`)),
+  );
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers)) {
+    const baseBranch = tryLocalPullBaseBranch(itemNumber);
+    if (baseBranch) return { openclawDir, gitTargetBranch: baseBranch };
+  }
+  return { openclawDir };
+}
+
+type ManagedLocalReviewCheckoutOptions = {
+  baseBranch: string;
+  cloneUrl?: string;
+  itemNumber: number;
+  targetDir: string;
+  targetRepo: string;
+};
+
+function prepareManagedLocalReviewCheckout(options: ManagedLocalReviewCheckoutOptions): void {
+  const { baseBranch, cloneUrl, itemNumber, targetDir, targetRepo } = options;
+  const remoteUrl = cloneUrl ?? githubCloneUrl(targetRepo);
+  ensureDir(dirname(targetDir));
+  const targetExists = existsSync(targetDir);
+  if (targetExists && !isGitWorkTree(targetDir)) {
+    const entries = readdirSync(targetDir);
+    if (entries.length > 0) {
+      throw new UserFacingCommandError(
+        `Managed local checkout target already exists and is not a git checkout: ${targetDir}. ` +
+          "Pass --target-dir to use an existing checkout or choose a different --artifact-dir.",
+      );
+    }
+  }
+  if (!targetExists || !isGitWorkTree(targetDir)) {
+    run("git", ["clone", "--filter=blob:none", "--no-checkout", remoteUrl, targetDir]);
+  } else {
+    ensureGitOriginRemote(targetDir, remoteUrl);
+  }
+
+  const branch = `clawsweeper/pr-${itemNumber}`;
+  console.error(
+    `[review] ${new Date().toISOString()} local-checkout=managed target=${targetDir} pr=#${itemNumber} base=${baseBranch}`,
+  );
+  run("git", ["fetch", "--force", "origin", `refs/pull/${itemNumber}/head`, "--depth=50"], {
+    cwd: targetDir,
+  });
+  run("git", ["checkout", "-f", "-B", branch, "FETCH_HEAD"], { cwd: targetDir });
+}
+
+function isGitWorkTree(dir: string): boolean {
+  try {
+    return run("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir }) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function githubCloneUrl(targetRepo: string): string {
+  return `https://github.com/${targetRepo}.git`;
+}
+
+function ensureGitOriginRemote(dir: string, remoteUrl: string): void {
+  try {
+    run("git", ["remote", "set-url", "origin", remoteUrl], { cwd: dir });
+  } catch {
+    run("git", ["remote", "add", "origin", remoteUrl], { cwd: dir });
+  }
+}
+
+export function defaultReviewArtifactDirForTest(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): string {
+  return defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers);
+}
+
+export function prepareManagedLocalReviewCheckoutForTest(
+  options: ManagedLocalReviewCheckoutOptions,
+): void {
+  prepareManagedLocalReviewCheckout(options);
 }
 
 export function reviewPromptTemplate(): string {
@@ -15757,17 +15930,30 @@ function planCommand(args: Args): void {
 
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
-  const openclawDir = resolve(
-    stringArg(args.target_dir, stringArg(args.openclaw_dir, `../${profile.checkoutDir}`)),
+  const localOnly = boolArg(args.local_only);
+  const itemNumber = numberArg(args.item_number, 0) || undefined;
+  const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
+  const itemNumbers = hasItemNumbersInput
+    ? itemNumbersArg(args.item_numbers, undefined)
+    : undefined;
+  const artifactDir = resolve(
+    stringArg(args.artifact_dir, defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers)),
   );
-  const artifactDir = resolve(stringArg(args.artifact_dir, "artifacts/reviews"));
+  const checkout = resolveReviewCheckout({
+    args,
+    artifactDir,
+    itemNumber,
+    itemNumbers,
+    localOnly,
+    profile,
+  });
+  const openclawDir = checkout.openclawDir;
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const batchSize = numberArg(args.batch_size, DEFAULT_PLAN_BATCH_SIZE);
   const maxPages = numberArg(args.max_pages, 250);
   const model = stringArg(args.codex_model, DEFAULT_CODEX_MODEL);
   const reasoningEffort = stringArg(args.codex_reasoning_effort, DEFAULT_REASONING_EFFORT);
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
-  const localOnly = boolArg(args.local_only);
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
   const additionalPrompt = stringArg(
@@ -15776,17 +15962,14 @@ function reviewCommand(args: Args): void {
   );
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
-  const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hotIntake = boolArg(args.hot_intake);
-  const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
-  const itemNumbers = hasItemNumbersInput
-    ? itemNumbersArg(args.item_numbers, undefined)
-    : undefined;
   const readonlyOpenclaw = boolArg(args.readonly_openclaw);
   const skipStartComment = boolArg(args.skip_start_comment) || localOnly;
   const forcedLoginMethod = reviewCodexForcedLoginMethod(args);
   ensureDir(artifactDir);
-  const git = gitInfo(openclawDir);
+  const git = checkout.gitTargetBranch
+    ? gitInfo(openclawDir, { targetBranch: checkout.gitTargetBranch })
+    : gitInfo(openclawDir);
   const reviewPolicy = reviewPolicyHash({ model, reasoningEffort, sandboxMode, serviceTier });
   const readonlyModeSnapshots = readonlyOpenclaw ? makeTreeReadOnly(openclawDir) : [];
   try {

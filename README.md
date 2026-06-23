@@ -563,7 +563,7 @@ readout. Maintainer setup is documented in
 ```bash
 codex login --device-auth -c 'service_tier="fast"'
 pnpm run codex:local:check
-pnpm run review:local -- --target-repo openclaw/openclaw --target-dir ../openclaw --item-number 96157 --artifact-dir artifacts/local-review-96157 --codex-model gpt-5.5 --codex-reasoning-effort high --codex-timeout-ms 600000
+pnpm run review:local -- --item-number 96157
 ```
 
 Use the PowerShell command form in the maintainer setup guide when running on
@@ -571,7 +571,12 @@ Windows.
 
 `--local-only` skips the review-start placeholder comment, defaults the Codex
 service tier to `fast` for local CLI compatibility, and leaves generated output
-under the selected artifact directory. Do not run `apply-artifacts` or
+under the selected artifact directory. With a single `--item-number` and no
+`--target-dir`, it creates a managed PR checkout under
+`artifacts/local-review-<number>/target`. To use an already-cloned checkout,
+or to review an issue, pass `--target-dir <path>`; the default artifact
+directory still stays `artifacts/local-review-<number>`. Do not run
+`apply-artifacts` or
 `apply-decisions` unless you intentionally want to move reports into durable
 state or sync GitHub comments.
 
