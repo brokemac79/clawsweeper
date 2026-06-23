@@ -108,6 +108,11 @@ import {
 } from "./clawsweeper-args.js";
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
 import {
+  renderDecisionPacketPublicBlock,
+  syncDecisionPacketRecord,
+  type DecisionPacketSubjectState,
+} from "./decision-packets.js";
+import {
   appendReviewHistoryCycle,
   neutralizeReviewControlMarkers,
   parseReviewHistory,
@@ -125,6 +130,10 @@ export {
 } from "./codex-env.js";
 export { parseGhJson, parseGhJsonLines } from "./github-json.js";
 export { itemNumbersArg } from "./clawsweeper-args.js";
+export {
+  buildDecisionPacketFromReport,
+  renderDecisionPacketPublicBlock,
+} from "./decision-packets.js";
 export { safeOutputTail } from "./clawsweeper-text.js";
 export {
   ghRetryKind,
@@ -2030,6 +2039,47 @@ function defaultClosedDir(profile = targetProfile()): string {
 
 function defaultPlansDir(profile = targetProfile()): string {
   return join(repoRecordsDir(profile), "plans");
+}
+
+function defaultDecisionPacketsDir(profile = targetProfile()): string {
+  return join(repoRecordsDir(profile), "decision-packets");
+}
+
+function siblingDecisionPacketsDir(
+  recordDir: string,
+  recordDirName: "items" | "closed",
+): string | undefined {
+  return basename(recordDir) === recordDirName
+    ? join(dirname(recordDir), "decision-packets")
+    : undefined;
+}
+
+function defaultDecisionPacketsDirForRecordDirs(
+  itemsDir: string,
+  closedDir: string,
+  profile = targetProfile(),
+): string {
+  const itemsPacketsDir = siblingDecisionPacketsDir(itemsDir, "items");
+  const closedPacketsDir = siblingDecisionPacketsDir(closedDir, "closed");
+  if (itemsPacketsDir && (!closedPacketsDir || itemsPacketsDir === closedPacketsDir)) {
+    return itemsPacketsDir;
+  }
+  if (closedPacketsDir && !itemsPacketsDir) return closedPacketsDir;
+  return defaultDecisionPacketsDir(profile);
+}
+
+function decisionPacketsDirFromArgs(args: Args, itemsDir: string, closedDir: string): string {
+  const explicitDecisionPacketsDir = stringArg(args.decision_packets_dir, "");
+  if (explicitDecisionPacketsDir) return resolve(explicitDecisionPacketsDir);
+  if (typeof args.items_dir === "string") {
+    const itemsPacketsDir = siblingDecisionPacketsDir(itemsDir, "items");
+    if (itemsPacketsDir) return resolve(itemsPacketsDir);
+  }
+  if (typeof args.closed_dir === "string") {
+    const closedPacketsDir = siblingDecisionPacketsDir(closedDir, "closed");
+    if (closedPacketsDir) return resolve(closedPacketsDir);
+  }
+  return resolve(defaultDecisionPacketsDirForRecordDirs(itemsDir, closedDir));
 }
 
 function reportFileName(repo: string, number: number): string {
@@ -15176,6 +15226,10 @@ function renderKeepOpenCommentFromReport(
     isPullRequest ? "Next step before merge" : "Next step",
     publicNextStepLine,
   );
+  const decisionPacketBlock = renderDecisionPacketPublicBlock(markdown);
+  if (decisionPacketBlock) {
+    appendPublicSection(lines, "Maintainer decision needed", decisionPacketBlock);
+  }
   const securityLine = publicSecurityReviewLine(securityReview);
   if (securityLine) appendPublicSection(lines, "Security", securityLine);
   if (isPullRequest && reviewFindings.length) {
@@ -17729,6 +17783,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const closedDir = resolve(stringArg(args.closed_dir, defaultClosedDir()));
   const plansDir = resolve(stringArg(args.plans_dir, defaultPlansDir()));
+  const decisionPacketsDir = decisionPacketsDirFromArgs(args, itemsDir, closedDir);
   const limit = numberArg(args.limit, 20);
   const processedLimit = numberArg(args.processed_limit, Math.max(limit * 2, 50));
   const minAgeDays = numberArg(args.min_age_days, 0);
@@ -17810,6 +17865,29 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         location,
         ...applyQueueSortFields(entry.markdown, syncCommentsOnly, applyKind),
       }));
+  const syncDecisionPacketMarkdown = (
+    reportPath: string,
+    nextMarkdown: string,
+    subjectState: DecisionPacketSubjectState = "open",
+  ): string =>
+    syncDecisionPacketRecord({
+      markdown: nextMarkdown,
+      reportPath,
+      packetsDir: decisionPacketsDir,
+      repoRoot: ROOT,
+      subjectState,
+    }).markdown;
+  const writeReportMarkdown = (
+    reportPath: string,
+    nextMarkdown: string,
+    subjectState: DecisionPacketSubjectState = "open",
+  ): void => {
+    writeFileSync(
+      reportPath,
+      syncDecisionPacketMarkdown(reportPath, nextMarkdown, subjectState),
+      "utf8",
+    );
+  };
   const fileEntries = applyReportEntriesForDir(itemsDir, "items").sort(
     (left, right) =>
       left.priority - right.priority ||
@@ -17866,17 +17944,19 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     const archiveClosed = (nextMarkdown: string): void => {
       if (dryRun) return;
       ensureDir(closedDir);
-      writeFileSync(path, nextMarkdown, "utf8");
+      const closedPath = join(closedDir, file);
+      const syncedMarkdown = syncDecisionPacketMarkdown(closedPath, nextMarkdown, "closed");
+      writeFileSync(path, syncedMarkdown, "utf8");
       syncWorkPlanFromReport({
-        markdown: nextMarkdown,
+        markdown: syncedMarkdown,
         reportPath: path,
         plansDir,
       });
-      renameSync(path, join(closedDir, file));
+      renameSync(path, closedPath);
     };
     const markApplyChecked = (): void => {
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
+      if (!dryRun) writeReportMarkdown(path, markdown);
     };
     const recordApplySkipped = (actionTaken: ActionTaken, reason: string): boolean => {
       markApplyChecked();
@@ -18513,7 +18593,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         );
       }
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
+      if (!dryRun) writeReportMarkdown(path, markdown);
       results.push({
         number,
         action: "skipped_changed_since_review",
@@ -18665,7 +18745,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       markdown = replaceFrontMatterValue(markdown, "action_taken", "skipped_changed_since_review");
       markdown = replaceFrontMatterValue(markdown, "current_item_updated_at", item.updatedAt);
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
+      if (!dryRun) writeReportMarkdown(path, markdown);
       results.push({
         number,
         action: "skipped_changed_since_review",
@@ -18686,7 +18766,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         );
         markdown = replaceFrontMatterValue(markdown, "current_item_snapshot_hash", currentHash);
         markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-        if (!dryRun) writeFileSync(path, markdown, "utf8");
+        if (!dryRun) writeReportMarkdown(path, markdown);
         results.push({
           number,
           action: "skipped_changed_since_review",
@@ -18960,7 +19040,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         : null;
       if (staleSyncReason) {
         markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-        if (!dryRun) writeFileSync(path, markdown, "utf8");
+        if (!dryRun) writeReportMarkdown(path, markdown);
         results.push({
           number,
           action: "skipped_stale_review_comment_sync",
@@ -19011,7 +19091,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       }
       markdown = updateReviewCommentMetadata(markdown, syncedComment, markedReviewComment);
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
+      if (!dryRun) writeReportMarkdown(path, markdown);
       results.push({
         number,
         action: proofBlockedForCommentSync?.actionTaken ?? "review_comment_synced",
@@ -19026,7 +19106,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     if (proofBlockedForCommentSync) {
       if (!needsReviewCommentSync) {
         markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-        if (!dryRun) writeFileSync(path, markdown, "utf8");
+        if (!dryRun) writeReportMarkdown(path, markdown);
         results.push({
           number,
           action: proofBlockedForCommentSync.actionTaken,
@@ -19044,7 +19124,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       (!isCloseProposal || syncCommentsOnly)
     ) {
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
+      if (!dryRun) writeReportMarkdown(path, markdown);
       results.push({
         number,
         action: "kept_open",
@@ -19880,6 +19960,7 @@ function applyArtifactsCommand(args: Args): void {
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const closedDir = resolve(stringArg(args.closed_dir, defaultClosedDir()));
   const plansDir = resolve(stringArg(args.plans_dir, defaultPlansDir()));
+  const decisionPacketsDir = decisionPacketsDirFromArgs(args, itemsDir, closedDir);
   const skipReconcile = boolArg(args.skip_reconcile);
   const replayClosedArtifacts = boolArg(args.replay_closed_artifacts);
   const maxPages = numberArg(args.max_pages, 250);
@@ -19914,12 +19995,19 @@ function applyArtifactsCommand(args: Args): void {
       const stalePath = join(destinationDir === itemsDir ? closedDir : itemsDir, destinationFile);
       if (existsSync(stalePath)) unlinkSync(stalePath);
       const reportPath = join(destinationDir, destinationFile);
-      writeFileSync(reportPath, markdown, "utf8");
+      const syncedMarkdown = syncDecisionPacketRecord({
+        markdown,
+        reportPath,
+        packetsDir: decisionPacketsDir,
+        repoRoot: ROOT,
+        subjectState: destination === "closed" ? "closed" : "open",
+      }).markdown;
+      writeFileSync(reportPath, syncedMarkdown, "utf8");
       if (destination === "closed") {
         const planPath = workPlanPathForReport(reportPath, plansDir);
         if (existsSync(planPath)) unlinkSync(planPath);
       } else {
-        syncWorkPlanFromReport({ markdown, reportPath, plansDir });
+        syncWorkPlanFromReport({ markdown: syncedMarkdown, reportPath, plansDir });
       }
       appliedArtifacts += 1;
     }
@@ -19927,7 +20015,7 @@ function applyArtifactsCommand(args: Args): void {
   console.error(
     `[apply-artifacts] applied=${appliedArtifacts} skipped_closed=${skippedClosedArtifacts}`,
   );
-  if (!skipReconcile) reconcileFolders({ itemsDir, closedDir, plansDir });
+  if (!skipReconcile) reconcileFolders({ itemsDir, closedDir, plansDir, decisionPacketsDir });
 }
 
 function artifactTargetIsOpen(number: number, openNumbers: Set<number> | null): boolean {
@@ -20359,6 +20447,7 @@ function reconcileFolders(options: {
   itemsDir: string;
   closedDir: string;
   plansDir?: string;
+  decisionPacketsDir?: string;
   maxPages?: number;
   dryRun?: boolean;
   fetchClosedAt?: boolean;
@@ -20368,6 +20457,20 @@ function reconcileFolders(options: {
   const dryRun = options.dryRun ?? false;
   const fetchClosedAt = options.fetchClosedAt ?? true;
   const plansDir = options.plansDir ?? defaultPlansDir();
+  const syncReconciledDecisionPacket = (
+    markdown: string,
+    reportPath: string,
+    subjectState: DecisionPacketSubjectState,
+  ): string => {
+    if (dryRun || !options.decisionPacketsDir) return markdown;
+    return syncDecisionPacketRecord({
+      markdown,
+      reportPath,
+      packetsDir: options.decisionPacketsDir,
+      repoRoot: ROOT,
+      subjectState,
+    }).markdown;
+  };
   ensureDir(options.itemsDir);
   ensureDir(options.closedDir);
   const { numbers: openNumbers, pagesScanned } = fetchOpenItemNumbers(maxPages);
@@ -20401,7 +20504,11 @@ function reconcileFolders(options: {
         );
       }
     }
-    const markdown = markReconciledState(sourceMarkdown, "closed", { closedAt });
+    const markdown = syncReconciledDecisionPacket(
+      markReconciledState(sourceMarkdown, "closed", { closedAt }),
+      destinationPath,
+      "closed",
+    );
     moveMarkdownFile({ sourcePath, destinationPath, markdown, dryRun });
     if (!dryRun) {
       const planPath = workPlanPathForReport(sourcePath, plansDir);
@@ -20418,11 +20525,26 @@ function reconcileFolders(options: {
     if (!openNumbers.has(number)) continue;
     const destinationPath = join(options.itemsDir, file);
     if (existsSync(destinationPath)) {
-      if (!dryRun) unlinkSync(sourcePath);
+      if (!dryRun) {
+        const destinationMarkdown = readFileSync(destinationPath, "utf8");
+        const syncedDestinationMarkdown = syncReconciledDecisionPacket(
+          destinationMarkdown,
+          destinationPath,
+          "open",
+        );
+        if (syncedDestinationMarkdown !== destinationMarkdown) {
+          writeFileSync(destinationPath, syncedDestinationMarkdown, "utf8");
+        }
+        unlinkSync(sourcePath);
+      }
       removedStaleClosedCopies += 1;
       continue;
     }
-    const markdown = markReconciledState(sourceMarkdown, "open");
+    const markdown = syncReconciledDecisionPacket(
+      markReconciledState(sourceMarkdown, "open"),
+      destinationPath,
+      "open",
+    );
     moveMarkdownFile({ sourcePath, destinationPath, markdown, dryRun });
     syncWorkPlanFromReport({ markdown, reportPath: destinationPath, plansDir, dryRun });
     movedToItems += 1;
@@ -20443,6 +20565,7 @@ function reconcileCommand(args: Args): void {
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const closedDir = resolve(stringArg(args.closed_dir, defaultClosedDir()));
   const plansDir = resolve(stringArg(args.plans_dir, defaultPlansDir()));
+  const decisionPacketsDir = decisionPacketsDirFromArgs(args, itemsDir, closedDir);
   const maxPages = numberArg(args.max_pages, 250);
   const dryRun = boolArg(args.dry_run);
   const fetchClosedAt = !boolArg(args.skip_closed_at);
@@ -20451,6 +20574,7 @@ function reconcileCommand(args: Args): void {
     itemsDir,
     closedDir,
     plansDir,
+    decisionPacketsDir,
     maxPages,
     dryRun,
     fetchClosedAt,
