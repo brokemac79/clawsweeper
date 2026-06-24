@@ -6631,6 +6631,15 @@ function displayPath(path: string): string {
   return relativePath.startsWith("..") ? path : relativePath;
 }
 
+function displayDurationMs(ms: number): string {
+  const boundedMs = Math.max(0, Math.floor(ms));
+  const seconds = Math.floor(boundedMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
+
 export function defaultReviewArtifactDirForTest(
   localOnly: boolean,
   itemNumber: number | undefined,
@@ -16083,6 +16092,7 @@ function reviewCommand(args: Args): void {
     );
     let completed = 0;
     let codexFailures = 0;
+    const codexFailureReports: string[] = [];
     for (const item of candidates) {
       if (humanLocalReview) {
         console.error("");
@@ -16134,11 +16144,19 @@ function reviewCommand(args: Args): void {
       }
       let decision: Decision;
       let codexElapsedMs = 0;
+      let codexFailed = false;
       const codexStartedAt = Date.now();
       try {
         if (humanLocalReview) {
           console.error("");
           console.error("Running Codex review");
+          console.error(`  timeout: ${displayDurationMs(timeoutMs)}`);
+          console.error(
+            `  stdout: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stdout.log`))}`,
+          );
+          console.error(
+            `  stderr: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stderr.log`))}`,
+          );
         }
         decision = runCodex({
           item,
@@ -16161,6 +16179,7 @@ function reviewCommand(args: Args): void {
         });
       } catch (error) {
         codexFailures += 1;
+        codexFailed = true;
         if (error instanceof CodexReviewError) {
           decision = codexFailureDecision(error.status, error.message, error.stdout, error.stderr, {
             errorCode: error.errorCode,
@@ -16204,9 +16223,11 @@ function reviewCommand(args: Args): void {
         "utf8",
       );
       completed += 1;
+      if (codexFailed) codexFailureReports.push(reportPath);
       if (humanLocalReview) {
         console.error("");
-        console.error("Review complete");
+        console.error(codexFailed ? "Codex review failed" : "Review complete");
+        console.error(`  elapsed: ${displayDurationMs(codexElapsedMs)}`);
         console.error(`  decision: ${decision.decision}`);
         console.error(`  confidence: ${decision.confidence}`);
         console.error(`  action: ${action.actionTaken}`);
@@ -16223,9 +16244,17 @@ function reviewCommand(args: Args): void {
       );
     }
     if (codexFailures > 0) {
-      throw new Error(
-        `Codex failed for ${codexFailures} item${codexFailures === 1 ? "" : "s"}; review artifacts were written and the workflow recovery lane can requeue the planned set.`,
-      );
+      const message = `Codex failed for ${codexFailures} item${
+        codexFailures === 1 ? "" : "s"
+      }; review artifacts were written and the workflow recovery lane can requeue the planned set.${
+        codexFailureReports.length > 0
+          ? ` Report${codexFailureReports.length === 1 ? "" : "s"}: ${codexFailureReports
+              .map(displayPath)
+              .join(", ")}`
+          : ""
+      }`;
+      if (humanLocalReview) throw new UserFacingCommandError(message);
+      throw new Error(message);
     }
   } finally {
     restoreTreeModes(readonlyModeSnapshots);
