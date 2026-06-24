@@ -83,25 +83,25 @@ checkout.
 ## Run A PR Review
 
 Run one pull request per command. Avoid `--item-numbers` for this maintainer
-workflow; one-at-a-time runs keep artifacts, logs, and GitHub comments tied to
-one PR and avoid shell argument parsing surprises.
+workflow; one-at-a-time runs keep artifacts and logs tied to one PR and avoid
+shell argument parsing surprises.
 
 From the ClawSweeper checkout:
 
 ```sh
-pnpm run review:local -- --item-number <pr-number>
+pnpm run review -- --local-only --item-number <pr-number>
 ```
 
 PowerShell:
 
 ```powershell
-pnpm run review:local -- --item-number <pr-number>
+pnpm run review -- --local-only --item-number <pr-number>
 ```
 
 To use a supplied checkout instead:
 
 ```sh
-pnpm run review:local -- \
+pnpm run review -- --local-only \
   --item-number <pr-number> \
   --target-dir ../openclaw-clawsweeper-target
 ```
@@ -187,7 +187,7 @@ Fallback skill creation prompt:
 ```text
 Create a Codex skill named local-clawsweeper-review. Its workflow is:
 use a clean ClawSweeper checkout, run pnpm run codex:local:check, run
-pnpm run review:local with --item-number for one PR at a time, read
+pnpm run review -- --local-only --item-number <pr-number> for one PR at a time, read
 artifacts/local-review-<pr>/<pr>.md, summarize
 review_status/main_sha/pull_head_sha/decision/confidence/findings, and do not
 post GitHub comments or run apply/repair/merge commands unless explicitly asked.
@@ -214,7 +214,7 @@ update, or merge.
 
 ## Safety
 
-- Run one PR at a time with `pnpm run review:local`.
+- Run one PR at a time with `pnpm run review -- --local-only`.
 - Do not run `apply-artifacts`, `apply-decisions`, repair, merge, or GitHub
   comment commands unless the user explicitly asks for that mutation.
 - Do not print `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, GitHub
@@ -261,13 +261,13 @@ Do not switch, pull, or overwrite a dirty target checkout.
 From the ClawSweeper checkout:
 
 ```sh
-pnpm run review:local -- --item-number <pr-number>
+pnpm run review -- --local-only --item-number <pr-number>
 ```
 
 To use a supplied checkout:
 
 ```sh
-pnpm run review:local -- \
+pnpm run review -- --local-only \
   --item-number <pr-number> \
   --target-dir <target-dir>
 ```
@@ -288,7 +288,7 @@ Read `artifacts/local-review-<pr-number>/<pr-number>.md` and summarize:
 - findings or blockers
 - exact auth/runtime failure if the run failed
 
-Before reporting success, confirm `review:local` or `--local-only` was used and
+Before reporting success, confirm `review --local-only` was used and
 any supplied target checkout stayed clean.
 ````
 
@@ -316,7 +316,7 @@ Maintainers can run an advisory local ClawSweeper review before asking the
 hosted bot to re-review a PR. Clone `openclaw/clawsweeper`, follow
 `docs/local-clawsweeper-review.md`, authenticate your own Codex CLI with
 `codex login --device-auth -c 'service_tier="fast"'`, and run
-`pnpm run review:local -- --item-number <pr-number>`.
+`pnpm run review -- --local-only --item-number <pr-number>`.
 
 Local output is for maintainer triage only. It does not replace hosted
 ClawSweeper checks, GitHub comments, merge gates, or automerge approval.
@@ -326,7 +326,7 @@ ClawSweeper checks, GitHub comments, merge gates, or automerge approval.
 
 - Local review uses each maintainer's own Codex CLI auth.
 - Do not commit API keys, Codex auth files, or GitHub tokens.
-- `review:local` uses `--local-only`, skips the starter GitHub comment, and
-  writes a local artifact.
+- `review --local-only` skips the starter GitHub comment and writes a local
+  artifact.
 - Do not run `apply-artifacts`, `apply-decisions`, or repair/automerge commands
   unless the maintainer explicitly wants GitHub mutation.

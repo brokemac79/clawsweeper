@@ -10,7 +10,7 @@ output before submitting, updating, or merging a PR.
 
 ## Safety Boundary
 
-- Run only `pnpm run review:local` for the default workflow.
+- Run only `pnpm run review -- --local-only` for the default workflow.
 - Do not run `apply-artifacts`, `apply-decisions`, GitHub comment posting, or
   merge/autofix commands unless the user explicitly asks for that mutation.
 - Do not print `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, GitHub
@@ -105,13 +105,13 @@ it.
 From the ClawSweeper checkout:
 
 ```sh
-pnpm run review:local -- --item-number <pr-number>
+pnpm run review -- --local-only --item-number <pr-number>
 ```
 
 To use a supplied checkout or review an issue:
 
 ```sh
-pnpm run review:local -- \
+pnpm run review -- --local-only \
   --item-number <issue-or-pr-number> \
   --target-dir <target-dir>
 ```
@@ -149,7 +149,7 @@ stderr or log summary.
 
 Before reporting success:
 
-- Confirm the command used `review:local` or `--local-only`.
+- Confirm the command used `review --local-only`.
 - Confirm no GitHub comments, labels, merges, or apply commands were run.
 - Confirm the target checkout is still clean.
 - If findings exist, list the actionable items and the next local fix/test step.
