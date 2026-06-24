@@ -556,18 +556,15 @@ pnpm run reconcile -- --target-repo openclaw/openclaw --dry-run
 Advisory exact local issue/PR review:
 
 For Codex users, the repo-local skill `$local-clawsweeper-review` wraps this
-as a pre-PR workflow with setup checks, target checkout hygiene, and artifact
-readout. Maintainer setup is documented in
-[`docs/local-clawsweeper-review.md`](docs/local-clawsweeper-review.md).
+workflow with setup checks, target checkout hygiene, and artifact readout. Skill
+usage is documented in
+[`docs/local-clawsweeper-skill.md`](docs/local-clawsweeper-skill.md).
 
 ```bash
 codex login --device-auth -c 'service_tier="fast"'
 pnpm run codex:local:check
-pnpm run review -- --local-only --item-number 96157
+pnpm run review -- --local-only --target-repo owner/name --item-number 123
 ```
-
-Use the PowerShell command form in the maintainer setup guide when running on
-Windows.
 
 `review` is the single issue/PR review command. `--local-only` makes it an
 advisory local run: it skips the review-start placeholder comment, defaults the
@@ -575,14 +572,30 @@ Codex service tier to `fast` for local CLI compatibility, preserves local Codex
 auth, and leaves generated output under the selected artifact directory. With a
 single `--item-number` and no `--target-dir`, it creates a managed PR checkout
 under `artifacts/local-review-<number>/target`. To use an already-cloned
-checkout, or to review an issue, pass `--target-dir <path>`; the default
-artifact directory still stays `artifacts/local-review-<number>`. Do not run
-`apply-artifacts` or `apply-decisions` unless you intentionally want to move
-reports into durable state or sync GitHub comments. Add `--verbose` when you
-need the underlying `[review]` diagnostic logs.
+checkout, or to review an issue, pass `--target-dir <path>`:
+
+```bash
+pnpm run review -- --local-only \
+  --target-repo owner/name \
+  --item-number 123 \
+  --target-dir ../target-checkout
+```
+
+Read the report at `artifacts/local-review-<number>/<number>.md`. Key fields are
+`review_status`, `main_sha`, `pull_head_sha`, `decision`, `confidence`, and
+`Review Findings`. Do not run `apply-artifacts` or `apply-decisions` unless you
+intentionally want to move reports into durable state or sync GitHub comments.
+Add `--verbose` when you need the underlying `[review]` diagnostic logs.
 
 If you prefer API-key auth, keep the key out of the repository and shell
-history. For PowerShell:
+history. For POSIX shells:
+
+```sh
+printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key -c 'service_tier="fast"'
+unset OPENAI_API_KEY
+```
+
+For PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key"

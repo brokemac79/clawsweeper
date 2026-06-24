@@ -5,8 +5,8 @@ description: Run a local ClawSweeper issue or PR review before submitting or upd
 
 # Local ClawSweeper Review
 
-Use this skill when an OpenClaw maintainer wants local read-only ClawSweeper
-output before submitting, updating, or merging a PR.
+Use this skill when someone wants read-only local ClawSweeper output before
+submitting, updating, or re-reviewing an issue or PR.
 
 ## Safety Boundary
 
@@ -78,8 +78,8 @@ By default, an exact local PR review manages its own target checkout under
 Pass `--target-dir` when the operator wants to review an existing checkout or
 an issue.
 
-Use a clean target checkout of the repository being reviewed. For OpenClaw,
-prefer a dedicated review checkout if the normal worktree is dirty:
+Use a clean target checkout of the repository being reviewed. Prefer a dedicated
+review checkout if the normal worktree is dirty:
 
 - Windows: `C:\oc-work\clawsweeper-local-target-openclaw`
 - POSIX fallback: `../openclaw`
@@ -116,9 +116,8 @@ pnpm run review -- --local-only \
   --target-dir <target-dir>
 ```
 
-The exact local command prints a maintainer-oriented progress summary by
-default. Add `--verbose` only when debugging checkout, selection, or Codex
-process details.
+The exact local command prints a human-readable progress summary by default. Add
+`--verbose` only when debugging checkout, selection, or Codex process details.
 
 For quick smoke tests, lower `--batch-size`, `--shard-count`, `--max-pages`, and
 `--codex-timeout-ms`, but label the result as a smoke run rather than a full
