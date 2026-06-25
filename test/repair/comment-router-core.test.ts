@@ -1280,6 +1280,27 @@ test("parseTrustedAutomation accepts trusted ClawSweeper pass verdicts for autom
   assert.match(parsed.repair_reason, /verdict: pass/);
 });
 
+test("parseTrustedAutomation accepts trusted ClawSweeper close markers for autoclose", () => {
+  const trustedAuthors = new Set(["clawsweeper[bot]"]);
+  const parsed = parseTrustedAutomation(
+    {
+      user: { login: "clawsweeper[bot]" },
+      body: [
+        "ClawSweeper proposed closing this PR.",
+        "<!-- clawsweeper-verdict:close item=96097 sha=abc123 confidence=high reason=duplicate_or_superseded -->",
+        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high reason=duplicate_or_superseded -->",
+      ].join("\n"),
+    },
+    { trustedAuthors },
+  );
+
+  assert.equal(parsed.intent, "autoclose");
+  assert.equal(parsed.trusted_bot, true);
+  assert.equal(parsed.expected_head_sha, "abc123");
+  assert.equal(parsed.close_reason, "duplicate_or_superseded");
+  assert.match(parsed.autoclose_message, /close-required/);
+});
+
 test("repairLoopPauseLabels identifies pause labels for trusted pass resume", () => {
   assert.deepEqual(
     repairLoopPauseLabels([
@@ -1328,6 +1349,19 @@ test("router classifies fresh human-review pauses before label sweeps", () => {
   assert.ok(classifyComments >= 0);
   assert.ok(repairLoopSweeps > classifyComments);
   assert.match(source, /\.filter\(isReadyHumanReviewPause\)/);
+});
+
+test("trusted autoclose markers are stale-head gated before close execution", () => {
+  const source = readFileSync("src/repair/comment-router.ts", "utf8");
+  const autocloseClassifier = source.slice(
+    source.indexOf("function classifyAutoclose"),
+    source.indexOf("function executeAutoclose"),
+  );
+
+  assert.match(autocloseClassifier, /command\.trusted_bot && pull/);
+  assert.match(autocloseClassifier, /reviewedHeadShaBlockReason\(\{/);
+  assert.match(autocloseClassifier, /markerName:\s*"close"/);
+  assert.match(autocloseClassifier, /status:\s*"skipped"/);
 });
 
 test("parseTrustedAutomation repairs trusted pass verdicts that still contain P findings", () => {

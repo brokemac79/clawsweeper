@@ -14979,7 +14979,11 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     ].join("\n");
   }
   if (decision === "close") {
-    return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
+    const closeReason = frontMatterValue(markdown, "close_reason") ?? "unknown";
+    return [
+      `<!-- clawsweeper-verdict:close ${baseAttrs} reason=${markerAttributeValue(closeReason)} -->`,
+      `<!-- clawsweeper-action:close-required ${baseAttrs} reason=${markerAttributeValue(closeReason)} -->`,
+    ].join("\n");
   }
   return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
 }

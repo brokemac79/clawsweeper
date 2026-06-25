@@ -1157,6 +1157,16 @@ export function parseTrustedAutomation(
   const verdict = clawsweeperMarker(body, "verdict");
   const actionMarker = clawsweeperMarker(body, "action");
   const securityMarker = clawsweeperMarker(body, "security");
+  if (actionMarker?.action === "close-required" || verdict?.action === "close") {
+    const marker = actionMarker ?? verdict;
+    if (marker) {
+      return trustedClose({
+        author,
+        reason: `structured ClawSweeper close marker: ${marker.action}${markerReasonSuffix(marker.attrs)}`,
+        marker,
+      });
+    }
+  }
   if (verdict?.action === "human-review") {
     return trustedHumanReview({
       author,
@@ -2008,6 +2018,22 @@ function trustedMerge({ author, reason, marker = null }: LooseRecord) {
     automation_source: "clawsweeper",
     repair_reason: reason,
     expected_head_sha: marker?.attrs?.sha ?? null,
+    finding_id: marker?.attrs?.finding ?? null,
+  };
+}
+
+function trustedClose({ author, reason, marker = null }: LooseRecord) {
+  return {
+    trigger: "trusted_bot",
+    command: `autoclose ${reason}`,
+    intent: "autoclose",
+    trusted_bot: true,
+    trusted_bot_author: author,
+    automation_source: "clawsweeper",
+    repair_reason: reason,
+    autoclose_message: reason,
+    expected_head_sha: marker?.attrs?.sha ?? null,
+    close_reason: marker?.attrs?.reason ?? null,
     finding_id: marker?.attrs?.finding ?? null,
   };
 }

@@ -387,6 +387,28 @@ test("high-confidence root-cause clusters appear in close comments", () => {
   assert.match(comment, /Canonical: https:\/\/github\.com\/openclaw\/clawsweeper\/issues\/400/);
 });
 
+test("pull request close comments emit close-required automation markers", () => {
+  const comment = renderReviewCommentFromReport(
+    implementedCloseReport({
+      repository: "openclaw/openclaw",
+      type: "pull_request",
+      number: 74270,
+      pull_head_sha: "abc123def456",
+    }),
+    "implemented_on_main",
+  );
+
+  assert.match(
+    comment,
+    /<!-- clawsweeper-verdict:close item=74270 sha=abc123def456 confidence=high reason=implemented_on_main -->/,
+  );
+  assert.match(
+    comment,
+    /<!-- clawsweeper-action:close-required item=74270 sha=abc123def456 confidence=high reason=implemented_on_main -->/,
+  );
+  assert.doesNotMatch(comment, /clawsweeper-verdict:needs-human/);
+});
+
 test("issue keep-open review comments suggest concrete reproduction help", () => {
   const comment = renderReviewCommentFromReport(
     `${reportFrontMatter({

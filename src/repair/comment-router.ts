@@ -847,6 +847,21 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
       actions: [{ action: "comment", status: execute ? "pending" : "planned" }],
     };
   }
+  if (command.trusted_bot && pull) {
+    const headBlock = reviewedHeadShaBlockReason({
+      expectedHeadSha: command.expected_head_sha,
+      currentHeadSha: pull.headRefOid,
+      markerName: "close",
+    });
+    if (headBlock) {
+      return {
+        ...command,
+        autoclose_reason: reason,
+        status: "skipped",
+        reason: headBlock,
+      };
+    }
+  }
   const targets = discoverAutocloseTargets({ command, issue, pull });
   if (targets.length === 0) {
     return {
