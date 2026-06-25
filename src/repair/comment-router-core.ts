@@ -1082,6 +1082,13 @@ export function trustedCloseBlockReason({
   if (!isAutoCloseAllowed(profile, closeKind, reason)) {
     return `${reason} is not allowed for ${profile.targetRepo} ${closeKind} apply policy`;
   }
+  if (
+    closeKind === "pull_request" &&
+    reason === "unconfirmed_product_direction" &&
+    !unconfirmedProductDirectionTrustedCloseEnabled()
+  ) {
+    return "unconfirmed_product_direction close requires CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED=1";
+  }
 
   const protectedLabels = trustedCloseBlockingProtectedLabels(labels, reason);
   if (protectedLabels.length > 0) return `protected label: ${protectedLabels.join(", ")}`;
@@ -1110,6 +1117,15 @@ export function trustedCloseBlockReason({
   if (activityBlock) return activityBlock;
 
   return null;
+}
+
+function envFlagEnabled(value: JsonValue): boolean {
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function unconfirmedProductDirectionTrustedCloseEnabled(env: LooseRecord = process.env): boolean {
+  return envFlagEnabled(env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED);
 }
 
 function normalizedCloseKind(kind: JsonValue): RepositoryItemKind | null {

@@ -1436,6 +1436,27 @@ test("trusted close gates block protected labels, source drift, and unsupported 
     trustedCloseBlockReason({ ...base, closeReason: "stale_insufficient_info" }),
     /stale_insufficient_info is not allowed for openclaw\/openclaw pull_request apply policy/,
   );
+  const originalProductDirectionPolicy =
+    process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED;
+  delete process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED;
+  try {
+    assert.match(
+      trustedCloseBlockReason({ ...base, closeReason: "unconfirmed_product_direction" }),
+      /unconfirmed_product_direction close requires CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED=1/,
+    );
+    process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED = "true";
+    assert.equal(
+      trustedCloseBlockReason({ ...base, closeReason: "unconfirmed_product_direction" }),
+      null,
+    );
+  } finally {
+    if (originalProductDirectionPolicy === undefined) {
+      delete process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED;
+    } else {
+      process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED =
+        originalProductDirectionPolicy;
+    }
+  }
   assert.match(
     trustedCloseBlockReason({ ...base, closeConfidence: "medium" }),
     /confidence must be high/,
