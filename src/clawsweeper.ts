@@ -15138,8 +15138,56 @@ function commentBody(comment: Record<string, unknown> | undefined): string | und
   return typeof body === "string" ? body : undefined;
 }
 
-function commentBodyMatches(comment: Record<string, unknown> | undefined, body: string): boolean {
-  return commentBody(comment)?.trim() === body.trim();
+const APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS = new Set([
+  "proposed_close",
+  "kept_open",
+  "skipped_pr_close_coverage_proof",
+  "retry_pr_close_coverage_proof",
+  ...RETRYABLE_CLOSE_SKIP_ACTIONS,
+  ...PAIR_BLOCKED_CLOSE_ACTIONS,
+]);
+
+function normalizeApplySyncCloseMarkerAction(body: string): string {
+  return body.replace(
+    /(<!-- clawsweeper-(?:verdict:close|action:close-required)\b[^>]*\s)action_taken=([^\s>]+)(?=\s|-->)/g,
+    (match, prefix: string, action: string) =>
+      APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS.has(action)
+        ? `${prefix}action_taken=proposed_close`
+        : match,
+  );
+}
+
+function commentBodyMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  const actual = commentBody(comment)?.trim();
+  const expected = body.trim();
+  if (actual === expected) return true;
+  if (!actual || !options.allowApplyCloseActionUpgrade) return false;
+  return (
+    normalizeApplySyncCloseMarkerAction(actual) === normalizeApplySyncCloseMarkerAction(expected)
+  );
+}
+
+function reviewCommentHashMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  storedHash: string | undefined,
+  expectedHash: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  if (storedHash === expectedHash) return true;
+  if (!storedHash || !options.allowApplyCloseActionUpgrade) return false;
+  const actual = commentBody(comment)?.trim();
+  if (!actual) return false;
+  if (
+    normalizeApplySyncCloseMarkerAction(actual) !== normalizeApplySyncCloseMarkerAction(body.trim())
+  ) {
+    return false;
+  }
+  return storedHash === sha256(actual);
 }
 
 const PATCHABLE_REVIEW_COMMENT_AUTHORS = new Set(
@@ -16890,6 +16938,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               counterpartNumber,
               counterpartReviewCommentBody,
             );
+            const counterpartAllowApplyCloseActionUpgrade =
+              isApplyCloseCandidateReport(counterpartMarkdown);
+            const counterpartMarkedReviewCommentHash = sha256(counterpartMarkedReviewComment);
             const counterpartNeedsReviewCommentSync = shouldSyncReviewComment({
               syncCommentsOnly: false,
               isCloseProposal: true,
@@ -16902,10 +16953,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               needsReviewCommentBodySync: !commentBodyMatches(
                 counterpartReviewComment,
                 counterpartMarkedReviewComment,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
               ),
-              needsReviewCommentHashSync:
-                frontMatterValue(counterpartMarkdown, "review_comment_sha256") !==
-                sha256(counterpartMarkedReviewComment),
+              needsReviewCommentHashSync: !reviewCommentHashMatches(
+                counterpartReviewComment,
+                counterpartMarkedReviewComment,
+                frontMatterValue(counterpartMarkdown, "review_comment_sha256"),
+                counterpartMarkedReviewCommentHash,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
+              ),
               needsReviewCommentReferenceSync:
                 frontMatterValue(counterpartMarkdown, "review_comment_id") === "unknown" ||
                 frontMatterValue(counterpartMarkdown, "review_comment_url") === "unknown",
@@ -17480,13 +17536,20 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       }
     }
     let reviewCommentHash = sha256(markedReviewComment);
+    const allowApplyCloseActionUpgrade = isUpgradedCloseCandidate;
     let existingReviewCommentMatches = commentBodyMatches(
       existingReviewComment,
       markedReviewComment,
+      { allowApplyCloseActionUpgrade },
     );
     let needsReviewCommentBodySync = !existingReviewComment || !existingReviewCommentMatches;
-    let needsReviewCommentHashSync =
-      frontMatterValue(markdown, "review_comment_sha256") !== reviewCommentHash;
+    let needsReviewCommentHashSync = !reviewCommentHashMatches(
+      existingReviewComment,
+      markedReviewComment,
+      frontMatterValue(markdown, "review_comment_sha256"),
+      reviewCommentHash,
+      { allowApplyCloseActionUpgrade },
+    );
     let needsReviewCommentReferenceSync =
       frontMatterValue(markdown, "review_comment_id") === "unknown" ||
       frontMatterValue(markdown, "review_comment_url") === "unknown";
