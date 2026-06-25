@@ -7,6 +7,12 @@ import {
 } from "./comment-command-text.js";
 import { renderJobIntentFrontmatter } from "./job-intent.js";
 import { compactText } from "./text-utils.js";
+import {
+  isAutoCloseAllowed,
+  repositoryProfileFor,
+  type RepositoryCloseReason,
+  type RepositoryItemKind,
+} from "../repository-profiles.js";
 export const REPAIR_INTENTS = new Set([
   "fix_ci",
   "address_review",
@@ -33,6 +39,13 @@ export const DEFAULT_ASSIST_MODEL = "internal";
 export const DEFAULT_ASSIST_REASONING_EFFORT = "low";
 export const DEFAULT_ASSIST_TIMEOUT_MS = "120000";
 const REPAIR_LOOP_PAUSE_LABELS = [HUMAN_REVIEW_LABEL, MANUAL_ONLY_LABEL, MERGE_READY_LABEL];
+const TRUSTED_CLOSE_PROTECTED_LABELS = new Set([
+  "security",
+  "beta-blocker",
+  "release-blocker",
+  "maintainer",
+]);
+const MAINTAINER_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const CLAWSWEEPER_REPLY_BADGES = {
   default: "🦞👀",
   repair: "🦞🔧",
@@ -1021,6 +1034,140 @@ export function reviewedHeadShaBlockReason({
     return `ClawSweeper ${marker} marker targets a stale PR head SHA`;
   }
   return null;
+}
+
+export function trustedCloseBlockReason({
+  repo,
+  kind,
+  labels,
+  closeReason,
+  expectedHeadSha,
+  currentHeadSha,
+  authorAssociation,
+  reviewedAt,
+  comments,
+  trustedAuthors = new Set(),
+}: LooseRecord): string | null {
+  const headBlock = reviewedHeadShaBlockReason({
+    expectedHeadSha,
+    currentHeadSha,
+    markerName: "close",
+  });
+  if (headBlock) return headBlock;
+
+  const closeKind = normalizedCloseKind(kind);
+  if (!closeKind) return "trusted close marker requires an issue or pull request target";
+
+  const reason = String(closeReason ?? "").trim() as RepositoryCloseReason;
+  if (!reason || reason === "none")
+    return "trusted close marker must include an apply close reason";
+
+  const profile = trustedCloseRepositoryProfile(repo);
+  if (typeof profile === "string") return profile;
+  if (!isAutoCloseAllowed(profile, closeKind, reason)) {
+    return `${reason} is not allowed for ${profile.targetRepo} ${closeKind} apply policy`;
+  }
+
+  const protectedLabels = trustedCloseBlockingProtectedLabels(labels, reason);
+  if (protectedLabels.length > 0) return `protected label: ${protectedLabels.join(", ")}`;
+
+  const normalizedAuthorAssociation = normalizeAuthorAssociation(authorAssociation);
+  if (closeKind === "pull_request" && !isVerifiedFixedCloseReason(reason)) {
+    if (MAINTAINER_AUTHOR_ASSOCIATIONS.has(normalizedAuthorAssociation)) {
+      return `author association is ${normalizedAuthorAssociation}`;
+    }
+  }
+
+  const activityBlock = nonAutomationActivityAfterReviewBlock({
+    comments,
+    reviewedAt,
+    trustedAuthors,
+  });
+  if (activityBlock) return activityBlock;
+
+  return null;
+}
+
+function normalizedCloseKind(kind: JsonValue): RepositoryItemKind | null {
+  const value = String(kind ?? "").trim();
+  if (value === "issue" || value === "pull_request") return value;
+  return null;
+}
+
+function trustedCloseRepositoryProfile(repo: JsonValue) {
+  try {
+    return repositoryProfileFor(String(repo ?? ""));
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "trusted close target repository is unsupported";
+  }
+}
+
+function trustedCloseBlockingProtectedLabels(labels: JsonValue, closeReason: JsonValue): string[] {
+  const blocked = normalizedLabels(labels).filter((label) =>
+    TRUSTED_CLOSE_PROTECTED_LABELS.has(label),
+  );
+  if (!isVerifiedFixedCloseReason(closeReason)) return unique(blocked);
+  return unique(blocked.filter((label) => label !== "maintainer"));
+}
+
+function normalizedLabels(labels: JsonValue): string[] {
+  if (!Array.isArray(labels)) return [];
+  return labels
+    .map((label) =>
+      String((label as LooseRecord)?.name ?? label)
+        .trim()
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+}
+
+function isVerifiedFixedCloseReason(reason: JsonValue): boolean {
+  return String(reason ?? "") === "implemented_on_main";
+}
+
+function normalizeAuthorAssociation(value: JsonValue): string {
+  const normalized = String(value ?? "")
+    .trim()
+    .toUpperCase();
+  return normalized || "NONE";
+}
+
+function nonAutomationActivityAfterReviewBlock({
+  comments,
+  reviewedAt,
+  trustedAuthors,
+}: LooseRecord): string | null {
+  const reviewedAtMs = Date.parse(String(reviewedAt ?? ""));
+  if (!Number.isFinite(reviewedAtMs))
+    return "trusted close marker must include the reviewed item timestamp";
+  if (!Array.isArray(comments)) return null;
+
+  const trusted = new Set(
+    [...trustedAuthors].map((author: JsonValue) =>
+      String(author ?? "")
+        .trim()
+        .toLowerCase(),
+    ),
+  );
+  const comment = comments.find((entry: JsonValue) => {
+    const updatedAtMs = Date.parse(String(entry?.updated_at ?? entry?.created_at ?? ""));
+    if (!Number.isFinite(updatedAtMs) || updatedAtMs <= reviewedAtMs) return false;
+    const author = String(entry?.user?.login ?? "")
+      .trim()
+      .toLowerCase();
+    return !trusted.has(author) && !isAutomationAuthor(author);
+  });
+  if (!comment) return null;
+  const author = String(comment?.user?.login ?? "unknown author").trim() || "unknown author";
+  return `non-automation activity after trusted close review by ${author}`;
+}
+
+function isAutomationAuthor(author: string): boolean {
+  return (
+    /(?:^|[-_])(bot|app)$|\[bot\]$/i.test(author) || /clawsweeper|github-actions/i.test(author)
+  );
 }
 
 type AutoRepairDispatchEntry = {
@@ -2034,6 +2181,8 @@ function trustedClose({ author, reason, marker = null }: LooseRecord) {
     autoclose_message: reason,
     expected_head_sha: marker?.attrs?.sha ?? null,
     close_reason: marker?.attrs?.reason ?? null,
+    reviewed_at: marker?.attrs?.reviewed_at ?? null,
+    expected_item_updated_at: marker?.attrs?.updated_at ?? null,
     finding_id: marker?.attrs?.finding ?? null,
   };
 }

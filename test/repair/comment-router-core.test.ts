@@ -67,6 +67,7 @@ import {
   staleAutomergeActivationReason,
   staleClosedItemCommandReason,
   shouldClearMaintainerCommandReaction,
+  trustedCloseBlockReason,
   usesSharedAutomergeStatus,
 } from "../../dist/repair/comment-router-core.js";
 import { CLAWSWEEPER_CO_AUTHOR_TRAILER } from "../../dist/repair/co-author-credit.js";
@@ -1301,6 +1302,25 @@ test("parseTrustedAutomation accepts trusted ClawSweeper close markers for autoc
   assert.match(parsed.autoclose_message, /close-required/);
 });
 
+test("trusted close markers carry close policy metadata into autoclose commands", () => {
+  const trustedAuthors = new Set(["clawsweeper[bot]"]);
+  const parsed = parseTrustedAutomation(
+    {
+      user: { login: "clawsweeper[bot]" },
+      body: [
+        "ClawSweeper proposed closing this PR.",
+        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high updated_at=2026-06-25T22:00:00Z reviewed_at=2026-06-25T22:05:00Z reason=duplicate_or_superseded -->",
+      ].join("\n"),
+    },
+    { trustedAuthors },
+  );
+
+  assert.equal(parsed.intent, "autoclose");
+  assert.equal(parsed.close_reason, "duplicate_or_superseded");
+  assert.equal(parsed.expected_item_updated_at, "2026-06-25T22:00:00Z");
+  assert.equal(parsed.reviewed_at, "2026-06-25T22:05:00Z");
+});
+
 test("repairLoopPauseLabels identifies pause labels for trusted pass resume", () => {
   assert.deepEqual(
     repairLoopPauseLabels([
@@ -1351,17 +1371,65 @@ test("router classifies fresh human-review pauses before label sweeps", () => {
   assert.match(source, /\.filter\(isReadyHumanReviewPause\)/);
 });
 
-test("trusted autoclose markers are stale-head gated before close execution", () => {
+test("trusted autoclose markers are live close gated before close execution", () => {
   const source = readFileSync("src/repair/comment-router.ts", "utf8");
   const autocloseClassifier = source.slice(
     source.indexOf("function classifyAutoclose"),
     source.indexOf("function executeAutoclose"),
   );
+  const autocloseExecutor = source.slice(
+    source.indexOf("function executeAutoclose"),
+    source.indexOf("function discoverAutocloseTargets"),
+  );
+  const coreSource = readFileSync("src/repair/comment-router-core.ts", "utf8");
+  const trustedCloseGate = coreSource.slice(
+    coreSource.indexOf("export function trustedCloseBlockReason"),
+    coreSource.indexOf("type AutoRepairDispatchEntry"),
+  );
 
   assert.match(autocloseClassifier, /command\.trusted_bot && pull/);
-  assert.match(autocloseClassifier, /reviewedHeadShaBlockReason\(\{/);
-  assert.match(autocloseClassifier, /markerName:\s*"close"/);
+  assert.match(autocloseClassifier, /trustedCloseBlockReason\(\{/);
+  assert.match(autocloseExecutor, /liveTrustedCloseBlockReason\(command,\s*liveTarget\)/);
+  assert.match(trustedCloseGate, /reviewedHeadShaBlockReason\(\{/);
+  assert.match(trustedCloseGate, /markerName:\s*"close"/);
   assert.match(autocloseClassifier, /status:\s*"skipped"/);
+});
+
+test("trusted close gates block protected labels, source drift, and unsupported reasons", () => {
+  const base = {
+    repo: "openclaw/openclaw",
+    kind: "pull_request",
+    labels: [],
+    closeReason: "duplicate_or_superseded",
+    expectedHeadSha: "abc123",
+    currentHeadSha: "abc123",
+    authorAssociation: "CONTRIBUTOR",
+    reviewedAt: "2026-06-25T22:05:00Z",
+    trustedAuthors: new Set(["clawsweeper[bot]"]),
+  };
+
+  assert.equal(trustedCloseBlockReason(base), null);
+  assert.equal(
+    trustedCloseBlockReason({ ...base, labels: ["release-blocker"] }),
+    "protected label: release-blocker",
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      comments: [
+        {
+          user: { login: "maintainer" },
+          created_at: "2026-06-25T22:06:00Z",
+          updated_at: "2026-06-25T22:06:00Z",
+        },
+      ],
+    }),
+    /non-automation activity after trusted close review by maintainer/,
+  );
+  assert.match(
+    trustedCloseBlockReason({ ...base, closeReason: "stale_insufficient_info" }),
+    /stale_insufficient_info is not allowed for openclaw\/openclaw pull_request apply policy/,
+  );
 });
 
 test("parseTrustedAutomation repairs trusted pass verdicts that still contain P findings", () => {

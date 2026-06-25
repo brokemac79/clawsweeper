@@ -14917,10 +14917,14 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   const decision = frontMatterValue(markdown, "decision");
   const confidence = frontMatterValue(markdown, "confidence") ?? "unknown";
   const headSha = pullHeadShaFromReport(markdown) ?? "unknown";
+  const itemUpdatedAt = frontMatterValue(markdown, "item_updated_at") ?? "unknown";
+  const reviewedAt = frontMatterValue(markdown, "reviewed_at") ?? "unknown";
   const baseAttrs = [
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
+    `updated_at=${markerAttributeValue(itemUpdatedAt)}`,
+    `reviewed_at=${markerAttributeValue(reviewedAt)}`,
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
   const humanReviewMarkers = (): string => {

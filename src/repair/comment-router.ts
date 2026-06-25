@@ -76,6 +76,7 @@ import {
   sharedAutomergeStatusMarkerPrefix,
   staleClosedItemCommandReason,
   shouldClearMaintainerCommandReaction,
+  trustedCloseBlockReason,
   usesSharedAutomergeStatus,
 } from "./comment-router-core.js";
 import { mergeAutomergeTimelineSection } from "./automerge-status-timeline.js";
@@ -233,6 +234,9 @@ for (const comment of comments) {
     freeform_prompt: parsed.freeform_prompt ?? null,
     visual_lens: parsed.visual_lens ?? null,
     expected_head_sha: parsed.expected_head_sha ?? null,
+    close_reason: parsed.close_reason ?? null,
+    reviewed_at: parsed.reviewed_at ?? null,
+    expected_item_updated_at: parsed.expected_item_updated_at ?? null,
     finding_id: parsed.finding_id ?? null,
     status: "pending",
     actions: [],
@@ -848,17 +852,24 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
     };
   }
   if (command.trusted_bot && pull) {
-    const headBlock = reviewedHeadShaBlockReason({
+    const trustedCloseBlock = trustedCloseBlockReason({
+      repo: command.repo,
+      kind: "pull_request",
+      labels: targetLabelsFromPull(pull),
+      closeReason: command.close_reason,
       expectedHeadSha: command.expected_head_sha,
       currentHeadSha: pull.headRefOid,
-      markerName: "close",
+      authorAssociation: issue.author_association,
+      reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
+      comments: cachedIssueComments(command.issue_number),
+      trustedAuthors: trustedBots,
     });
-    if (headBlock) {
+    if (trustedCloseBlock) {
       return {
         ...command,
         autoclose_reason: reason,
         status: "skipped",
-        reason: headBlock,
+        reason: trustedCloseBlock,
       };
     }
   }
@@ -2331,6 +2342,13 @@ function executeAutoclose(command: LooseRecord) {
         results.push({ ...liveTarget, status: "skipped", reason: "already closed" });
         continue;
       }
+      if (command.trusted_bot) {
+        const trustedCloseBlock = liveTrustedCloseBlockReason(command, liveTarget);
+        if (trustedCloseBlock) {
+          results.push({ ...liveTarget, status: "skipped", reason: trustedCloseBlock });
+          continue;
+        }
+      }
       if (Number(liveTarget.number) !== currentNumber) {
         postIssueComment(
           command.repo,
@@ -2375,6 +2393,37 @@ function discoverAutocloseTargets({ command, issue, pull }: LooseRecord): JsonVa
   return targets;
 }
 
+function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseRecord): string | null {
+  if (liveTarget.kind === "pull_request") {
+    const pull = fetchPullRequestView(liveTarget.number);
+    return trustedCloseBlockReason({
+      repo: command.repo,
+      kind: "pull_request",
+      labels: targetLabelsFromPull(pull),
+      closeReason: command.close_reason,
+      expectedHeadSha: command.expected_head_sha,
+      currentHeadSha: pull.headRefOid,
+      authorAssociation: fetchIssue(liveTarget.number).author_association,
+      reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
+      comments: cachedIssueComments(liveTarget.number),
+      trustedAuthors: trustedBots,
+    });
+  }
+  const issue = fetchIssue(liveTarget.number);
+  return trustedCloseBlockReason({
+    repo: command.repo,
+    kind: "issue",
+    labels: issue.labels,
+    closeReason: command.close_reason,
+    expectedHeadSha: null,
+    currentHeadSha: null,
+    authorAssociation: issue.author_association,
+    reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
+    comments: cachedIssueComments(liveTarget.number),
+    trustedAuthors: trustedBots,
+  });
+}
+
 function collectAutocloseCandidateNumbers({ command }: LooseRecord): number[] {
   const numbers = new Set<number>();
   const add = (value: JsonValue) => {
@@ -2409,6 +2458,10 @@ function issueTargetFromIssue(issue: LooseRecord) {
       issue.html_url ??
       `https://github.com/${targetRepo}/${issue.pull_request ? "pull" : "issues"}/${number}`,
   };
+}
+
+function targetLabelsFromPull(pull: LooseRecord): JsonValue[] {
+  return (pull.labels ?? []).map((item: JsonValue) => item?.name ?? item);
 }
 
 function autocloseReason(command: LooseRecord) {
