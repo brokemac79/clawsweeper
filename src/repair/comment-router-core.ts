@@ -1041,11 +1041,16 @@ export function trustedCloseBlockReason({
   kind,
   labels,
   closeReason,
+  closeConfidence,
+  closeActionTaken,
   expectedHeadSha,
   currentHeadSha,
+  expectedItemUpdatedAt,
+  currentItemUpdatedAt,
   authorAssociation,
   reviewedAt,
   comments,
+  sourceCommentId,
   trustedAuthors = new Set(),
 }: LooseRecord): string | null {
   const headBlock = reviewedHeadShaBlockReason({
@@ -1061,6 +1066,16 @@ export function trustedCloseBlockReason({
   const reason = String(closeReason ?? "").trim() as RepositoryCloseReason;
   if (!reason || reason === "none")
     return "trusted close marker must include an apply close reason";
+  const confidence = String(closeConfidence ?? "")
+    .trim()
+    .toLowerCase();
+  if (confidence !== "high") {
+    return `trusted close marker confidence must be high, got ${confidence || "unknown"}`;
+  }
+  const actionTaken = String(closeActionTaken ?? "").trim();
+  if (actionTaken !== "proposed_close") {
+    return `trusted close marker action_taken must be proposed_close, got ${actionTaken || "unknown"}`;
+  }
 
   const profile = trustedCloseRepositoryProfile(repo);
   if (typeof profile === "string") return profile;
@@ -1077,6 +1092,15 @@ export function trustedCloseBlockReason({
       return `author association is ${normalizedAuthorAssociation}`;
     }
   }
+
+  const updatedAtBlock = trustedCloseUpdatedAtBlockReason({
+    expectedItemUpdatedAt,
+    currentItemUpdatedAt,
+    comments,
+    sourceCommentId,
+    trustedAuthors,
+  });
+  if (updatedAtBlock) return updatedAtBlock;
 
   const activityBlock = nonAutomationActivityAfterReviewBlock({
     comments,
@@ -1110,6 +1134,60 @@ function trustedCloseBlockingProtectedLabels(labels: JsonValue, closeReason: Jso
   );
   if (!isVerifiedFixedCloseReason(closeReason)) return unique(blocked);
   return unique(blocked.filter((label) => label !== "maintainer"));
+}
+
+function trustedCloseUpdatedAtBlockReason({
+  expectedItemUpdatedAt,
+  currentItemUpdatedAt,
+  comments,
+  sourceCommentId,
+  trustedAuthors,
+}: LooseRecord): string | null {
+  const expectedMs = Date.parse(String(expectedItemUpdatedAt ?? ""));
+  if (!Number.isFinite(expectedMs)) {
+    return "trusted close marker must include the reviewed item updated_at timestamp";
+  }
+  const currentMs = Date.parse(String(currentItemUpdatedAt ?? ""));
+  if (!Number.isFinite(currentMs)) return "live issue/PR updated_at could not be verified";
+  if (currentMs <= expectedMs) return null;
+  if (
+    sourceCommentId &&
+    Array.isArray(comments) &&
+    comments.some((comment: JsonValue) =>
+      isTrustedCloseReviewCommentChurn({
+        comment,
+        sourceCommentId,
+        currentItemUpdatedAt,
+        trustedAuthors,
+      }),
+    )
+  ) {
+    return null;
+  }
+  return "live issue/PR updated_at changed since trusted close review";
+}
+
+function isTrustedCloseReviewCommentChurn({
+  comment,
+  sourceCommentId,
+  currentItemUpdatedAt,
+  trustedAuthors,
+}: LooseRecord): boolean {
+  if (String(comment?.id ?? "") !== String(sourceCommentId ?? "")) return false;
+  const author = String(comment?.user?.login ?? "")
+    .trim()
+    .toLowerCase();
+  const trusted = new Set(
+    [...trustedAuthors].map((candidate: JsonValue) =>
+      String(candidate ?? "")
+        .trim()
+        .toLowerCase(),
+    ),
+  );
+  if (!trusted.has(author) && !isAutomationAuthor(author)) return false;
+  return (
+    String(comment?.updated_at ?? comment?.created_at ?? "") === String(currentItemUpdatedAt ?? "")
+  );
 }
 
 function normalizedLabels(labels: JsonValue): string[] {
@@ -2181,6 +2259,8 @@ function trustedClose({ author, reason, marker = null }: LooseRecord) {
     autoclose_message: reason,
     expected_head_sha: marker?.attrs?.sha ?? null,
     close_reason: marker?.attrs?.reason ?? null,
+    close_confidence: marker?.attrs?.confidence ?? null,
+    close_action_taken: marker?.attrs?.action_taken ?? null,
     reviewed_at: marker?.attrs?.reviewed_at ?? null,
     expected_item_updated_at: marker?.attrs?.updated_at ?? null,
     finding_id: marker?.attrs?.finding ?? null,

@@ -1309,7 +1309,7 @@ test("trusted close markers carry close policy metadata into autoclose commands"
       user: { login: "clawsweeper[bot]" },
       body: [
         "ClawSweeper proposed closing this PR.",
-        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high updated_at=2026-06-25T22:00:00Z reviewed_at=2026-06-25T22:05:00Z reason=duplicate_or_superseded -->",
+        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high updated_at=2026-06-25T22:00:00Z reviewed_at=2026-06-25T22:05:00Z action_taken=proposed_close reason=duplicate_or_superseded -->",
       ].join("\n"),
     },
     { trustedAuthors },
@@ -1317,6 +1317,8 @@ test("trusted close markers carry close policy metadata into autoclose commands"
 
   assert.equal(parsed.intent, "autoclose");
   assert.equal(parsed.close_reason, "duplicate_or_superseded");
+  assert.equal(parsed.close_confidence, "high");
+  assert.equal(parsed.close_action_taken, "proposed_close");
   assert.equal(parsed.expected_item_updated_at, "2026-06-25T22:00:00Z");
   assert.equal(parsed.reviewed_at, "2026-06-25T22:05:00Z");
 });
@@ -1401,8 +1403,12 @@ test("trusted close gates block protected labels, source drift, and unsupported 
     kind: "pull_request",
     labels: [],
     closeReason: "duplicate_or_superseded",
+    closeConfidence: "high",
+    closeActionTaken: "proposed_close",
     expectedHeadSha: "abc123",
     currentHeadSha: "abc123",
+    expectedItemUpdatedAt: "2026-06-25T22:00:00Z",
+    currentItemUpdatedAt: "2026-06-25T22:00:00Z",
     authorAssociation: "CONTRIBUTOR",
     reviewedAt: "2026-06-25T22:05:00Z",
     trustedAuthors: new Set(["clawsweeper[bot]"]),
@@ -1429,6 +1435,46 @@ test("trusted close gates block protected labels, source drift, and unsupported 
   assert.match(
     trustedCloseBlockReason({ ...base, closeReason: "stale_insufficient_info" }),
     /stale_insufficient_info is not allowed for openclaw\/openclaw pull_request apply policy/,
+  );
+  assert.match(
+    trustedCloseBlockReason({ ...base, closeConfidence: "medium" }),
+    /confidence must be high/,
+  );
+  assert.match(
+    trustedCloseBlockReason({ ...base, closeActionTaken: "kept_open" }),
+    /action_taken must be proposed_close/,
+  );
+  assert.equal(
+    trustedCloseBlockReason({
+      ...base,
+      currentItemUpdatedAt: "2026-06-25T22:07:00Z",
+      sourceCommentId: "123",
+      comments: [
+        {
+          id: "123",
+          user: { login: "clawsweeper[bot]" },
+          created_at: "2026-06-25T22:05:00Z",
+          updated_at: "2026-06-25T22:07:00Z",
+        },
+      ],
+    }),
+    null,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      currentItemUpdatedAt: "2026-06-25T22:08:00Z",
+      sourceCommentId: "123",
+      comments: [
+        {
+          id: "123",
+          user: { login: "clawsweeper[bot]" },
+          created_at: "2026-06-25T22:05:00Z",
+          updated_at: "2026-06-25T22:07:00Z",
+        },
+      ],
+    }),
+    /live issue\/PR updated_at changed since trusted close review/,
   );
 });
 

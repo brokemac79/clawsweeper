@@ -235,6 +235,8 @@ for (const comment of comments) {
     visual_lens: parsed.visual_lens ?? null,
     expected_head_sha: parsed.expected_head_sha ?? null,
     close_reason: parsed.close_reason ?? null,
+    close_confidence: parsed.close_confidence ?? null,
+    close_action_taken: parsed.close_action_taken ?? null,
     reviewed_at: parsed.reviewed_at ?? null,
     expected_item_updated_at: parsed.expected_item_updated_at ?? null,
     finding_id: parsed.finding_id ?? null,
@@ -857,11 +859,16 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
       kind: "pull_request",
       labels: targetLabelsFromPull(pull),
       closeReason: command.close_reason,
+      closeConfidence: command.close_confidence,
+      closeActionTaken: command.close_action_taken,
       expectedHeadSha: command.expected_head_sha,
       currentHeadSha: pull.headRefOid,
+      expectedItemUpdatedAt: command.expected_item_updated_at,
+      currentItemUpdatedAt: issue.updated_at,
       authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
       comments: cachedIssueComments(command.issue_number),
+      sourceCommentId: command.comment_id,
       trustedAuthors: trustedBots,
     });
     if (trustedCloseBlock) {
@@ -2395,17 +2402,23 @@ function discoverAutocloseTargets({ command, issue, pull }: LooseRecord): JsonVa
 
 function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseRecord): string | null {
   if (liveTarget.kind === "pull_request") {
+    const issue = fetchIssue(liveTarget.number);
     const pull = fetchPullRequestView(liveTarget.number);
     return trustedCloseBlockReason({
       repo: command.repo,
       kind: "pull_request",
       labels: targetLabelsFromPull(pull),
       closeReason: command.close_reason,
+      closeConfidence: command.close_confidence,
+      closeActionTaken: command.close_action_taken,
       expectedHeadSha: command.expected_head_sha,
       currentHeadSha: pull.headRefOid,
-      authorAssociation: fetchIssue(liveTarget.number).author_association,
+      expectedItemUpdatedAt: command.expected_item_updated_at,
+      currentItemUpdatedAt: issue.updated_at,
+      authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
       comments: cachedIssueComments(liveTarget.number),
+      sourceCommentId: command.comment_id,
       trustedAuthors: trustedBots,
     });
   }
@@ -2415,11 +2428,16 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
     kind: "issue",
     labels: issue.labels,
     closeReason: command.close_reason,
+    closeConfidence: command.close_confidence,
+    closeActionTaken: command.close_action_taken,
     expectedHeadSha: null,
     currentHeadSha: null,
+    expectedItemUpdatedAt: command.expected_item_updated_at,
+    currentItemUpdatedAt: issue.updated_at,
     authorAssociation: issue.author_association,
     reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
     comments: cachedIssueComments(liveTarget.number),
+    sourceCommentId: command.comment_id,
     trustedAuthors: trustedBots,
   });
 }

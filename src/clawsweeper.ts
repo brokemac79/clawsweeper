@@ -14984,9 +14984,11 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   }
   if (decision === "close") {
     const closeReason = frontMatterValue(markdown, "close_reason") ?? "unknown";
+    const actionTaken = frontMatterValue(markdown, "action_taken") ?? "unknown";
+    const closeAttrs = `${baseAttrs} action_taken=${markerAttributeValue(actionTaken)} reason=${markerAttributeValue(closeReason)}`;
     return [
-      `<!-- clawsweeper-verdict:close ${baseAttrs} reason=${markerAttributeValue(closeReason)} -->`,
-      `<!-- clawsweeper-action:close-required ${baseAttrs} reason=${markerAttributeValue(closeReason)} -->`,
+      `<!-- clawsweeper-verdict:close ${closeAttrs} -->`,
+      `<!-- clawsweeper-action:close-required ${closeAttrs} -->`,
     ].join("\n");
   }
   return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
