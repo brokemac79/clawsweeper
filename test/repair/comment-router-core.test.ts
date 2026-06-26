@@ -1439,15 +1439,74 @@ test("trusted close gates block protected labels, source drift, and unsupported 
   const originalProductDirectionPolicy =
     process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED;
   delete process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED;
+  const productDirectionBase = {
+    ...base,
+    closeReason: "unconfirmed_product_direction",
+    createdAt: "2026-05-01T00:00:00Z",
+    expectedItemUpdatedAt: "2026-06-01T00:00:00Z",
+    currentItemUpdatedAt: "2026-06-01T00:00:00Z",
+    reviewedAt: "2026-06-10T00:00:00Z",
+    now: Date.parse("2026-06-25T00:00:00Z"),
+  };
   try {
     assert.match(
-      trustedCloseBlockReason({ ...base, closeReason: "unconfirmed_product_direction" }),
-      /unconfirmed_product_direction close requires CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED=1/,
+      trustedCloseBlockReason(productDirectionBase),
+      /unconfirmed product-direction apply policy is disabled/,
     );
     process.env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED = "true";
-    assert.equal(
-      trustedCloseBlockReason({ ...base, closeReason: "unconfirmed_product_direction" }),
-      null,
+    assert.equal(trustedCloseBlockReason(productDirectionBase), null);
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        createdAt: "2026-06-20T00:00:00Z",
+      }),
+      /requires PR older than 14 days/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        expectedItemUpdatedAt: "2026-06-08T00:00:00Z",
+      }),
+      /requires 7 days without source activity/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        labels: ["clawsweeper:human-review"],
+      }),
+      /clawsweeper:human-review exempts this PR from product-direction auto-close/,
+    );
+    assert.match(
+      trustedCloseBlockReason({ ...productDirectionBase, assignees: [{ login: "maintainer" }] }),
+      /assigned PR has active human signal/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        requestedReviewers: [{ login: "reviewer" }],
+      }),
+      /requested reviewers or teams indicate active review signal/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        comments: [{ author_association: "MEMBER" }],
+      }),
+      /maintainer issue comment calibrates product direction/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        reviews: [{ author_association: "OWNER" }],
+      }),
+      /maintainer PR review calibrates product direction/,
+    );
+    assert.match(
+      trustedCloseBlockReason({
+        ...productDirectionBase,
+        reviewComments: [{ author_association: "COLLABORATOR" }],
+      }),
+      /maintainer inline review comment calibrates product direction/,
     );
   } finally {
     if (originalProductDirectionPolicy === undefined) {
@@ -1457,6 +1516,42 @@ test("trusted close gates block protected labels, source drift, and unsupported 
         originalProductDirectionPolicy;
     }
   }
+  assert.equal(
+    trustedCloseBlockReason({ ...base, closeReason: "low_signal_unmergeable_pr" }),
+    null,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      closeReason: "low_signal_unmergeable_pr",
+      assignees: [{ login: "maintainer" }],
+    }),
+    /assigned PR has maintainer\/human signal/,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      closeReason: "low_signal_unmergeable_pr",
+      requestedTeams: [{ slug: "maintainers" }],
+    }),
+    /requested reviewers or teams indicate active review signal/,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      closeReason: "low_signal_unmergeable_pr",
+      comments: [{ author_association: "MEMBER" }],
+    }),
+    /maintainer issue comment blocks low-signal auto-close/,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      closeReason: "low_signal_unmergeable_pr",
+      reviews: [{ author_association: "OWNER" }],
+    }),
+    /maintainer PR review blocks low-signal auto-close/,
+  );
   assert.match(
     trustedCloseBlockReason({ ...base, closeConfidence: "medium" }),
     /confidence must be high/,

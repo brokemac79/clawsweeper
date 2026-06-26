@@ -2404,6 +2404,18 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
   if (liveTarget.kind === "pull_request") {
     const issue = fetchIssue(liveTarget.number);
     const pull = fetchPullRequestView(liveTarget.number);
+    const closeReason = String(command.close_reason ?? "");
+    const needsCloseSignalContext =
+      closeReason === "unconfirmed_product_direction" ||
+      closeReason === "low_signal_unmergeable_pr";
+    const pullApi = needsCloseSignalContext ? fetchPullRequestApi(liveTarget.number) : {};
+    const reviews = needsCloseSignalContext
+      ? ghPaged<JsonValue>(`repos/${targetRepo}/pulls/${liveTarget.number}/reviews?per_page=100`)
+      : [];
+    const reviewComments =
+      closeReason === "unconfirmed_product_direction"
+        ? ghPaged<JsonValue>(`repos/${targetRepo}/pulls/${liveTarget.number}/comments?per_page=100`)
+        : [];
     return trustedCloseBlockReason({
       repo: command.repo,
       kind: "pull_request",
@@ -2411,13 +2423,19 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
       closeReason: command.close_reason,
       closeConfidence: command.close_confidence,
       closeActionTaken: command.close_action_taken,
+      createdAt: issue.created_at,
       expectedHeadSha: command.expected_head_sha,
       currentHeadSha: pull.headRefOid,
       expectedItemUpdatedAt: command.expected_item_updated_at,
       currentItemUpdatedAt: issue.updated_at,
       authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
+      assignees: issue.assignees,
+      requestedReviewers: pullApi.requested_reviewers,
+      requestedTeams: pullApi.requested_teams,
       comments: cachedIssueComments(liveTarget.number),
+      reviews,
+      reviewComments,
       sourceCommentId: command.comment_id,
       trustedAuthors: trustedBots,
     });
@@ -3156,6 +3174,18 @@ function fetchPullRequestView(number: JsonValue) {
         "title",
         "url",
       ].join(","),
+    ],
+    { attempts: TARGET_LOOKUP_RETRY_ATTEMPTS },
+  );
+}
+
+function fetchPullRequestApi(number: JsonValue) {
+  return ghJson(
+    [
+      "api",
+      `repos/${targetRepo}/pulls/${number}`,
+      "--jq",
+      "{requested_reviewers:[.requested_reviewers[]? | {login:.login}],requested_teams:[.requested_teams[]? | {slug:.slug}]}",
     ],
     { attempts: TARGET_LOOKUP_RETRY_ATTEMPTS },
   );

@@ -46,6 +46,15 @@ const TRUSTED_CLOSE_PROTECTED_LABELS = new Set([
   "maintainer",
 ]);
 const MAINTAINER_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const DAY_MS = 24 * 60 * 60 * 1000;
+const UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS = 14;
+const UNCONFIRMED_PRODUCT_DIRECTION_MIN_INACTIVE_DAYS = 7;
+const UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS = new Set([
+  HUMAN_REVIEW_LABEL,
+  MANUAL_ONLY_LABEL,
+  AUTOMERGE_LABEL,
+  AUTOFIX_LABEL,
+]);
 const CLAWSWEEPER_REPLY_BADGES = {
   default: "🦞👀",
   repair: "🦞🔧",
@@ -1043,15 +1052,22 @@ export function trustedCloseBlockReason({
   closeReason,
   closeConfidence,
   closeActionTaken,
+  createdAt,
   expectedHeadSha,
   currentHeadSha,
   expectedItemUpdatedAt,
   currentItemUpdatedAt,
   authorAssociation,
   reviewedAt,
+  assignees,
+  requestedReviewers,
+  requestedTeams,
   comments,
+  reviews,
+  reviewComments,
   sourceCommentId,
   trustedAuthors = new Set(),
+  now,
 }: LooseRecord): string | null {
   const headBlock = reviewedHeadShaBlockReason({
     expectedHeadSha,
@@ -1087,7 +1103,25 @@ export function trustedCloseBlockReason({
     reason === "unconfirmed_product_direction" &&
     !unconfirmedProductDirectionTrustedCloseEnabled()
   ) {
-    return "unconfirmed_product_direction close requires CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED=1";
+    return "unconfirmed product-direction apply policy is disabled";
+  }
+  const reasonSpecificBlock = trustedCloseReasonSpecificBlockReason({
+    reason,
+    closeKind,
+    createdAt,
+    expectedItemUpdatedAt,
+    reviewedAt,
+    labels,
+    assignees,
+    requestedReviewers,
+    requestedTeams,
+    comments,
+    reviews,
+    reviewComments,
+    now,
+  });
+  if (reasonSpecificBlock) {
+    return reasonSpecificBlock;
   }
 
   const protectedLabels = trustedCloseBlockingProtectedLabels(labels, reason);
@@ -1126,6 +1160,137 @@ function envFlagEnabled(value: JsonValue): boolean {
 
 function unconfirmedProductDirectionTrustedCloseEnabled(env: LooseRecord = process.env): boolean {
   return envFlagEnabled(env.CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED);
+}
+
+function trustedCloseReasonSpecificBlockReason({
+  reason,
+  closeKind,
+  createdAt,
+  expectedItemUpdatedAt,
+  reviewedAt,
+  labels,
+  assignees,
+  requestedReviewers,
+  requestedTeams,
+  comments,
+  reviews,
+  reviewComments,
+  now,
+}: LooseRecord): string | null {
+  if (closeKind !== "pull_request") return null;
+  if (reason === "unconfirmed_product_direction") {
+    const ageBlock = unconfirmedProductDirectionTrustedCloseAgeBlock({
+      createdAt,
+      expectedItemUpdatedAt,
+      reviewedAt,
+      now,
+    });
+    if (ageBlock) return ageBlock;
+    const exemptLabel = normalizedLabels(labels).find((label) =>
+      UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS.has(label),
+    );
+    if (exemptLabel) return `${exemptLabel} exempts this PR from product-direction auto-close`;
+    const humanSignal = trustedCloseHumanSignalBlock({
+      assignees,
+      requestedReviewers,
+      requestedTeams,
+      comments,
+      reviews,
+      reviewComments,
+      productDirection: true,
+    });
+    if (humanSignal) return humanSignal;
+  }
+  if (reason === "low_signal_unmergeable_pr") {
+    const humanSignal = trustedCloseHumanSignalBlock({
+      assignees,
+      requestedReviewers,
+      requestedTeams,
+      comments,
+      reviews,
+      productDirection: false,
+    });
+    if (humanSignal) return humanSignal;
+  }
+  return null;
+}
+
+function unconfirmedProductDirectionTrustedCloseAgeBlock({
+  createdAt,
+  expectedItemUpdatedAt,
+  reviewedAt,
+  now,
+}: LooseRecord): string | null {
+  if (
+    !isOlderThanDays(
+      createdAt,
+      UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS,
+      Number(now) || Date.now(),
+    )
+  ) {
+    return `unconfirmed_product_direction requires PR older than ${UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS} days`;
+  }
+  const sourceUpdatedAtMs = Date.parse(String(expectedItemUpdatedAt ?? ""));
+  const reviewedAtMs = Date.parse(String(reviewedAt ?? ""));
+  if (
+    !Number.isFinite(sourceUpdatedAtMs) ||
+    !Number.isFinite(reviewedAtMs) ||
+    reviewedAtMs - sourceUpdatedAtMs <= UNCONFIRMED_PRODUCT_DIRECTION_MIN_INACTIVE_DAYS * DAY_MS
+  ) {
+    return `unconfirmed_product_direction requires ${UNCONFIRMED_PRODUCT_DIRECTION_MIN_INACTIVE_DAYS} days without source activity before review`;
+  }
+  return null;
+}
+
+function isOlderThanDays(value: JsonValue, days: number, now: number): boolean {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && now - timestamp > days * DAY_MS;
+}
+
+function trustedCloseHumanSignalBlock({
+  assignees,
+  requestedReviewers,
+  requestedTeams,
+  comments,
+  reviews,
+  reviewComments,
+  productDirection,
+}: LooseRecord): string | null {
+  if (nonEmptyArray(assignees)) {
+    return productDirection
+      ? "assigned PR has active human signal"
+      : "assigned PR has maintainer/human signal";
+  }
+  if (nonEmptyArray(requestedReviewers) || nonEmptyArray(requestedTeams)) {
+    return "requested reviewers or teams indicate active review signal";
+  }
+  if (maintainerAssociatedEntries(comments).length > 0) {
+    return productDirection
+      ? "maintainer issue comment calibrates product direction"
+      : "maintainer issue comment blocks low-signal auto-close";
+  }
+  if (maintainerAssociatedEntries(reviews).length > 0) {
+    return productDirection
+      ? "maintainer PR review calibrates product direction"
+      : "maintainer PR review blocks low-signal auto-close";
+  }
+  if (productDirection && maintainerAssociatedEntries(reviewComments).length > 0) {
+    return "maintainer inline review comment calibrates product direction";
+  }
+  return null;
+}
+
+function nonEmptyArray(value: JsonValue): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function maintainerAssociatedEntries(entries: JsonValue): JsonValue[] {
+  if (!Array.isArray(entries)) return [];
+  return entries.filter((entry) =>
+    MAINTAINER_AUTHOR_ASSOCIATIONS.has(
+      normalizeAuthorAssociation((entry as LooseRecord).author_association),
+    ),
+  );
 }
 
 function normalizedCloseKind(kind: JsonValue): RepositoryItemKind | null {
