@@ -1057,6 +1057,8 @@ export function trustedCloseBlockReason({
   currentHeadSha,
   expectedItemUpdatedAt,
   currentItemUpdatedAt,
+  expectedSourceRevision,
+  currentSourceRevision,
   authorAssociation,
   reviewedAt,
   assignees,
@@ -1137,6 +1139,8 @@ export function trustedCloseBlockReason({
   const updatedAtBlock = trustedCloseUpdatedAtBlockReason({
     expectedItemUpdatedAt,
     currentItemUpdatedAt,
+    expectedSourceRevision,
+    currentSourceRevision,
     comments,
     sourceCommentId,
     trustedAuthors,
@@ -1320,6 +1324,8 @@ function trustedCloseBlockingProtectedLabels(labels: JsonValue, closeReason: Jso
 function trustedCloseUpdatedAtBlockReason({
   expectedItemUpdatedAt,
   currentItemUpdatedAt,
+  expectedSourceRevision,
+  currentSourceRevision,
   comments,
   sourceCommentId,
   trustedAuthors,
@@ -1331,6 +1337,8 @@ function trustedCloseUpdatedAtBlockReason({
   const currentMs = Date.parse(String(currentItemUpdatedAt ?? ""));
   if (!Number.isFinite(currentMs)) return "live issue/PR updated_at could not be verified";
   if (currentMs <= expectedMs) return null;
+  const expectedRevision = String(expectedSourceRevision ?? "").trim();
+  const currentRevision = String(currentSourceRevision ?? "").trim();
   if (
     sourceCommentId &&
     Array.isArray(comments) &&
@@ -1341,9 +1349,14 @@ function trustedCloseUpdatedAtBlockReason({
         currentItemUpdatedAt,
         trustedAuthors,
       }),
-    )
+    ) &&
+    /^[a-f0-9]{64}$/i.test(expectedRevision) &&
+    currentRevision === expectedRevision
   ) {
     return null;
+  }
+  if (expectedRevision && currentRevision && currentRevision !== expectedRevision) {
+    return "source issue/PR changed since trusted close review";
   }
   return "live issue/PR updated_at changed since trusted close review";
 }
@@ -2444,6 +2457,7 @@ function trustedClose({ author, reason, marker = null }: LooseRecord) {
     close_action_taken: marker?.attrs?.action_taken ?? null,
     reviewed_at: marker?.attrs?.reviewed_at ?? null,
     expected_item_updated_at: marker?.attrs?.updated_at ?? null,
+    expected_source_revision: marker?.attrs?.source_revision ?? null,
     finding_id: marker?.attrs?.finding ?? null,
   };
 }

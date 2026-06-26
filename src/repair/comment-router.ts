@@ -239,6 +239,7 @@ for (const comment of comments) {
     close_action_taken: parsed.close_action_taken ?? null,
     reviewed_at: parsed.reviewed_at ?? null,
     expected_item_updated_at: parsed.expected_item_updated_at ?? null,
+    expected_source_revision: parsed.expected_source_revision ?? null,
     finding_id: parsed.finding_id ?? null,
     status: "pending",
     actions: [],
@@ -855,6 +856,7 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
   }
   if (command.trusted_bot && pull) {
     const closeReason = String(command.close_reason ?? "");
+    const comments = cachedIssueComments(command.issue_number);
     const needsCloseSignalContext =
       closeReason === "unconfirmed_product_direction" ||
       closeReason === "low_signal_unmergeable_pr";
@@ -880,12 +882,14 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
       currentHeadSha: pull.headRefOid,
       expectedItemUpdatedAt: command.expected_item_updated_at,
       currentItemUpdatedAt: issue.updated_at,
+      expectedSourceRevision: command.expected_source_revision,
+      currentSourceRevision: issueSourceRevisionSha256(issue, comments),
       authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
       assignees: issue.assignees,
       requestedReviewers: pullApi.requested_reviewers,
       requestedTeams: pullApi.requested_teams,
-      comments: cachedIssueComments(command.issue_number),
+      comments,
       reviews,
       reviewComments,
       sourceCommentId: command.comment_id,
@@ -2424,6 +2428,7 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
   if (liveTarget.kind === "pull_request") {
     const issue = fetchIssue(liveTarget.number);
     const pull = fetchPullRequestView(liveTarget.number);
+    const comments = cachedIssueComments(liveTarget.number);
     const closeReason = String(command.close_reason ?? "");
     const needsCloseSignalContext =
       closeReason === "unconfirmed_product_direction" ||
@@ -2448,12 +2453,14 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
       currentHeadSha: pull.headRefOid,
       expectedItemUpdatedAt: command.expected_item_updated_at,
       currentItemUpdatedAt: issue.updated_at,
+      expectedSourceRevision: command.expected_source_revision,
+      currentSourceRevision: issueSourceRevisionSha256(issue, comments),
       authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
       assignees: issue.assignees,
       requestedReviewers: pullApi.requested_reviewers,
       requestedTeams: pullApi.requested_teams,
-      comments: cachedIssueComments(liveTarget.number),
+      comments,
       reviews,
       reviewComments,
       sourceCommentId: command.comment_id,
@@ -2461,6 +2468,7 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
     });
   }
   const issue = fetchIssue(liveTarget.number);
+  const comments = cachedIssueComments(liveTarget.number);
   return trustedCloseBlockReason({
     repo: command.repo,
     kind: "issue",
@@ -2472,9 +2480,11 @@ function liveTrustedCloseBlockReason(command: LooseRecord, liveTarget: LooseReco
     currentHeadSha: null,
     expectedItemUpdatedAt: command.expected_item_updated_at,
     currentItemUpdatedAt: issue.updated_at,
+    expectedSourceRevision: command.expected_source_revision,
+    currentSourceRevision: issueSourceRevisionSha256(issue, comments),
     authorAssociation: issue.author_association,
     reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
-    comments: cachedIssueComments(liveTarget.number),
+    comments,
     sourceCommentId: command.comment_id,
     trustedAuthors: trustedBots,
   });

@@ -1309,7 +1309,7 @@ test("trusted close markers carry close policy metadata into autoclose commands"
       user: { login: "clawsweeper[bot]" },
       body: [
         "ClawSweeper proposed closing this PR.",
-        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high updated_at=2026-06-25T22:00:00Z reviewed_at=2026-06-25T22:05:00Z action_taken=proposed_close reason=duplicate_or_superseded -->",
+        "<!-- clawsweeper-action:close-required item=96097 sha=abc123 confidence=high updated_at=2026-06-25T22:00:00Z reviewed_at=2026-06-25T22:05:00Z source_revision=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef action_taken=proposed_close reason=duplicate_or_superseded -->",
       ].join("\n"),
     },
     { trustedAuthors },
@@ -1321,6 +1321,10 @@ test("trusted close markers carry close policy metadata into autoclose commands"
   assert.equal(parsed.close_action_taken, "proposed_close");
   assert.equal(parsed.expected_item_updated_at, "2026-06-25T22:00:00Z");
   assert.equal(parsed.reviewed_at, "2026-06-25T22:05:00Z");
+  assert.equal(
+    parsed.expected_source_revision,
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  );
 });
 
 test("repairLoopPauseLabels identifies pause labels for trusted pass resume", () => {
@@ -1414,6 +1418,8 @@ test("trusted close gates block protected labels, source drift, and unsupported 
     currentItemUpdatedAt: "2026-06-25T22:00:00Z",
     authorAssociation: "CONTRIBUTOR",
     reviewedAt: "2026-06-25T22:05:00Z",
+    expectedSourceRevision: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    currentSourceRevision: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     trustedAuthors: new Set(["clawsweeper[bot]"]),
   };
 
@@ -1578,6 +1584,23 @@ test("trusted close gates block protected labels, source drift, and unsupported 
       ],
     }),
     null,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      currentItemUpdatedAt: "2026-06-25T22:07:00Z",
+      currentSourceRevision: "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      sourceCommentId: "123",
+      comments: [
+        {
+          id: "123",
+          user: { login: "clawsweeper[bot]" },
+          created_at: "2026-06-25T22:05:00Z",
+          updated_at: "2026-06-25T22:07:00Z",
+        },
+      ],
+    }),
+    /source issue\/PR changed since trusted close review/,
   );
   assert.match(
     trustedCloseBlockReason({
