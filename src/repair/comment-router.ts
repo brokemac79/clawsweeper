@@ -854,6 +854,20 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
     };
   }
   if (command.trusted_bot && pull) {
+    const closeReason = String(command.close_reason ?? "");
+    const needsCloseSignalContext =
+      closeReason === "unconfirmed_product_direction" ||
+      closeReason === "low_signal_unmergeable_pr";
+    const pullApi = needsCloseSignalContext ? fetchPullRequestApi(command.issue_number) : {};
+    const reviews = needsCloseSignalContext
+      ? ghPaged<JsonValue>(`repos/${targetRepo}/pulls/${command.issue_number}/reviews?per_page=100`)
+      : [];
+    const reviewComments =
+      closeReason === "unconfirmed_product_direction"
+        ? ghPaged<JsonValue>(
+            `repos/${targetRepo}/pulls/${command.issue_number}/comments?per_page=100`,
+          )
+        : [];
     const trustedCloseBlock = trustedCloseBlockReason({
       repo: command.repo,
       kind: "pull_request",
@@ -861,13 +875,19 @@ function classifyAutoclose(command: LooseRecord, issue: LooseRecord, pull: Loose
       closeReason: command.close_reason,
       closeConfidence: command.close_confidence,
       closeActionTaken: command.close_action_taken,
+      createdAt: issue.created_at,
       expectedHeadSha: command.expected_head_sha,
       currentHeadSha: pull.headRefOid,
       expectedItemUpdatedAt: command.expected_item_updated_at,
       currentItemUpdatedAt: issue.updated_at,
       authorAssociation: issue.author_association,
       reviewedAt: command.reviewed_at ?? command.expected_item_updated_at,
+      assignees: issue.assignees,
+      requestedReviewers: pullApi.requested_reviewers,
+      requestedTeams: pullApi.requested_teams,
       comments: cachedIssueComments(command.issue_number),
+      reviews,
+      reviewComments,
       sourceCommentId: command.comment_id,
       trustedAuthors: trustedBots,
     });
