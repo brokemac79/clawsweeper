@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   canPatchReviewComment,
+  itemSourceRevisionSha256ForTest,
   isCodexReviewCommentBody,
   renderReviewCommentFromReport,
   renderReviewStartStatusComment,
@@ -105,6 +106,55 @@ test("review start status comment is marker-backed and crustacean-friendly", () 
   assert.match(comment, /<!-- clawsweeper-review-status:started item=74453 -->/);
   assert.match(comment, /<!-- clawsweeper-review item=74453 -->/);
   assert.doesNotMatch(comment, /Codex review:/);
+});
+
+test("review item source revision ignores advisory labels but tracks protected labels", () => {
+  const item = {
+    title: "Close duplicate PR",
+    body: "This was superseded by the canonical fix.",
+    labels: [{ name: "bug" }],
+  };
+  const revision = itemSourceRevisionSha256ForTest(item, []);
+
+  assert.equal(
+    itemSourceRevisionSha256ForTest(
+      {
+        ...item,
+        labels: [
+          ...item.labels,
+          { name: "status: ⏳ waiting on author" },
+          { name: "rating: 🧂 unranked krab" },
+          { name: "proof: sufficient" },
+          { name: "merge-risk: 🚨 automation" },
+          { name: "impact:message-loss" },
+          { name: "issue-rating: 🦪 silver shellfish" },
+          { name: "P1" },
+          { name: "feature: ✨ showcase" },
+          { name: "mantis: telegram-visible-proof" },
+          { name: "triage: needs-real-behavior-proof" },
+          { name: "clawsweeper:reviewed" },
+          { name: "no-stale" },
+          { name: "stale" },
+        ],
+      },
+      [],
+    ),
+    revision,
+  );
+  assert.notEqual(
+    itemSourceRevisionSha256ForTest(
+      { ...item, labels: [...item.labels, { name: "needs-design" }] },
+      [],
+    ),
+    revision,
+  );
+  assert.notEqual(
+    itemSourceRevisionSha256ForTest(
+      { ...item, labels: [...item.labels, { name: "release-blocker" }] },
+      [],
+    ),
+    revision,
+  );
 });
 
 test("pull request keep-open review comments label the change summary", () => {

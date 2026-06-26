@@ -2200,11 +2200,26 @@ function revisionLabels(labels: unknown): string[] {
 
 function isIgnorableSourceRevisionLabel(label: string) {
   return (
+    isClawSweeperAdvisorySourceRevisionLabel(label) ||
     (label.startsWith("clawsweeper:") &&
       !["clawsweeper:human-review", "clawsweeper:manual-only"].includes(label)) ||
     label === "no-stale" ||
     label === "stale"
   );
+}
+
+function isClawSweeperAdvisorySourceRevisionLabel(label: string): boolean {
+  return (
+    /^(?:status|rating|proof|merge-risk|impact|issue-rating):/.test(label) ||
+    /^p[0-3]$/.test(label) ||
+    label === "feature: ✨ showcase" ||
+    label === "mantis: telegram-visible-proof" ||
+    label === "triage: needs-real-behavior-proof"
+  );
+}
+
+export function itemSourceRevisionSha256ForTest(issue: unknown, comments: unknown[] = []): string {
+  return itemSourceRevisionSha256(issue, comments);
 }
 
 function reviewPolicyHash(options: {

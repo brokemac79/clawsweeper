@@ -71,6 +71,7 @@ import {
   usesSharedAutomergeStatus,
 } from "../../dist/repair/comment-router-core.js";
 import { CLAWSWEEPER_CO_AUTHOR_TRAILER } from "../../dist/repair/co-author-credit.js";
+import { issueSourceRevisionSha256 } from "../../dist/repair/issue-source-guard.js";
 import { parseSimpleYaml, validateJob } from "../../dist/repair/lib.js";
 
 test("planCommandAckConvergence scopes duplicate cleanup to the current status marker", () => {
@@ -1424,6 +1425,68 @@ test("trusted close gates block protected labels, source drift, and unsupported 
   };
 
   assert.equal(trustedCloseBlockReason(base), null);
+  const reviewedIssue = {
+    title: "Close duplicate PR",
+    body: "Superseded by the canonical fix.",
+    labels: [{ name: "bug" }],
+  };
+  const reviewedRevision = issueSourceRevisionSha256(reviewedIssue, []);
+  const advisoryLabelRevision = issueSourceRevisionSha256(
+    {
+      ...reviewedIssue,
+      labels: [
+        ...reviewedIssue.labels,
+        { name: "status: ⏳ waiting on author" },
+        { name: "rating: 🧂 unranked krab" },
+        { name: "proof: sufficient" },
+        { name: "merge-risk: 🚨 automation" },
+        { name: "P1" },
+      ],
+    },
+    [],
+  );
+  const userLabelRevision = issueSourceRevisionSha256(
+    { ...reviewedIssue, labels: [...reviewedIssue.labels, { name: "needs-design" }] },
+    [],
+  );
+  assert.equal(advisoryLabelRevision, reviewedRevision);
+  assert.notEqual(userLabelRevision, reviewedRevision);
+  assert.equal(
+    trustedCloseBlockReason({
+      ...base,
+      expectedSourceRevision: reviewedRevision,
+      currentSourceRevision: advisoryLabelRevision,
+      currentItemUpdatedAt: "2026-06-25T22:07:00Z",
+      sourceCommentId: "123",
+      comments: [
+        {
+          id: "123",
+          user: { login: "clawsweeper[bot]" },
+          created_at: "2026-06-25T22:05:00Z",
+          updated_at: "2026-06-25T22:07:00Z",
+        },
+      ],
+    }),
+    null,
+  );
+  assert.match(
+    trustedCloseBlockReason({
+      ...base,
+      expectedSourceRevision: reviewedRevision,
+      currentSourceRevision: userLabelRevision,
+      currentItemUpdatedAt: "2026-06-25T22:07:00Z",
+      sourceCommentId: "123",
+      comments: [
+        {
+          id: "123",
+          user: { login: "clawsweeper[bot]" },
+          created_at: "2026-06-25T22:05:00Z",
+          updated_at: "2026-06-25T22:07:00Z",
+        },
+      ],
+    }),
+    /source issue\/PR changed since trusted close review/,
+  );
   assert.equal(
     trustedCloseBlockReason({ ...base, labels: ["release-blocker"] }),
     "protected label: release-blocker",
