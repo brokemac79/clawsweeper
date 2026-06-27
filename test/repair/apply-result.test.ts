@@ -1238,6 +1238,8 @@ function runApplyResult(
       CLAWSWEEPER_MODEL: "model-test",
       CLAWSWEEPER_PR_CLOSE_COVERAGE_PROOF_TIMEOUT_MS: "10000",
       GH_TOKEN: "write-token",
+      GH_BIN: process.execPath,
+      GH_BIN_ARGS: JSON.stringify([path.join(paths.binDir, "gh.js")]),
       PATH: `${paths.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       PR_CLOSE_COVERAGE_PROOF_DECISION: options.proofDecision,
       PR_CLOSE_COVERAGE_PROOF_EXPECT_PROMPT: options.expectedPromptIncludes ?? "",
@@ -1252,7 +1254,7 @@ function runApplyResult(
 
 function writeFakeGh(binDir: string, data: FakeGhData) {
   fs.writeFileSync(
-    path.join(binDir, "gh"),
+    path.join(binDir, "gh.js"),
     `#!/usr/bin/env node
 	const fs = require("node:fs");
 const args = process.argv.slice(2);

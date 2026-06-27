@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { renderReviewCommentFromReport } from "../dist/clawsweeper.js";
 
@@ -674,6 +674,7 @@ export function withMockCodexProof(
   run: () => void,
 ): void {
   const originalPath = process.env.PATH;
+  const originalCodexBin = process.env.CODEX_BIN;
   const binDir = join(root, "bin");
   mkdirSync(binDir, { recursive: true });
   const codexPath = join(binDir, "codex");
@@ -721,9 +722,12 @@ process.exit(1);
 `;
   writeFileSync(codexPath, script, { mode: 0o755 });
   try {
-    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.CODEX_BIN = codexPath;
+    process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
     run();
   } finally {
+    if (originalCodexBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = originalCodexBin;
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
   }

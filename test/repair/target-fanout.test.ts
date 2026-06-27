@@ -80,7 +80,8 @@ process.exit(2);
       env: {
         ...process.env,
         GITHUB_ACTIONS: "true",
-        GH_BIN: ghPath,
+        GH_BIN: process.execPath,
+        GH_BIN_ARGS: JSON.stringify([ghPath]),
         GH_TOKEN: "workflow-token",
         CLAWSWEEPER_DISPATCH_TOKEN: "dispatch-token",
         CLAWSWEEPER_INVENTORY_TOKEN_OPENCLAW: "inventory-openclaw",
@@ -146,7 +147,8 @@ process.exit(2);
       env: {
         ...process.env,
         GITHUB_ACTIONS: "true",
-        GH_BIN: ghPath,
+        GH_BIN: process.execPath,
+        GH_BIN_ARGS: JSON.stringify([ghPath]),
         CLAWSWEEPER_DISPATCH_TOKEN: "dispatch-token",
         CLAWSWEEPER_INVENTORY_TOKEN_OPENCLAW: "inventory-openclaw",
         CLAWSWEEPER_INVENTORY_TOKEN_STEIPETE: "__public__",
@@ -242,7 +244,8 @@ process.exit(2);
       encoding: "utf8",
       env: {
         ...process.env,
-        GH_BIN: ghPath,
+        GH_BIN: process.execPath,
+        GH_BIN_ARGS: JSON.stringify([ghPath]),
         GH_TOKEN: "workflow-token",
         CLAWSWEEPER_DISPATCH_TOKEN: "dispatch-token",
         CLAWSWEEPER_INVENTORY_TOKEN_OPENCLAW: "inventory-openclaw",
@@ -321,7 +324,8 @@ process.exit(2);
       encoding: "utf8",
       env: {
         ...process.env,
-        GH_BIN: ghPath,
+        GH_BIN: process.execPath,
+        GH_BIN_ARGS: JSON.stringify([ghPath]),
         CLAWSWEEPER_INVENTORY_TOKEN_OPENCLAW: "inventory-openclaw",
       },
     },

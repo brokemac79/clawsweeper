@@ -90,7 +90,7 @@ test("pr repair intake supports author-wide open PR discovery", () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        PATH: `${path.join(root, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...fakeGhEnv(root),
       },
       encoding: "utf8",
     },
@@ -139,11 +139,20 @@ function runIntake(root: string, extraArgs: string[]): string {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        PATH: `${path.join(root, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...fakeGhEnv(root),
       },
       encoding: "utf8",
     },
   );
+}
+
+function fakeGhEnv(root: string): NodeJS.ProcessEnv {
+  const bin = path.join(root, "bin");
+  return {
+    GH_BIN: process.execPath,
+    GH_BIN_ARGS: JSON.stringify([path.join(bin, "gh")]),
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+  };
 }
 
 function writeFakeGh(bin: string, prs: unknown[]) {

@@ -141,9 +141,11 @@ export function ghPagedLimitWithRetry<T = JsonValue>(
 }
 
 export function ghText(ghArgs: string[], options: GhRunOptions = {}): string {
-  const text = execFileSync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  const text = execFileSync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
-    env: ghEnv(options.env),
+    env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: 64 * 1024 * 1024,
@@ -191,9 +193,11 @@ export async function ghTextWithRetryAsync(
 
 export async function ghTextAsync(ghArgs: string[], options: GhRunOptions = {}): Promise<string> {
   if (options.input !== undefined) return ghText(ghArgs, options);
-  const { stdout } = await execFileAsync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  const { stdout } = await execFileAsync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
-    env: ghEnv(options.env),
+    env,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -220,10 +224,12 @@ export function ghBestEffortWithRetry(
 }
 
 export function ghSpawn(ghArgs: string[], options: GhRunOptions = {}) {
-  return spawnSync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  return spawnSync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
     encoding: "utf8",
-    env: ghEnv(options.env),
+    env,
     input: options.input,
     stdio: "pipe",
   });
@@ -264,6 +270,24 @@ export function ghStdoutFromError(error: unknown): string {
 function resolveRetryOptions(options: GhRetryOptions | number): GhRetryOptions {
   if (typeof options === "number") return { attempts: options };
   return options;
+}
+
+function ghCommand(
+  ghArgs: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { command: string; args: string[] } {
+  const command = env.GH_BIN?.trim() || "gh";
+  return { command, args: [...envArgs("GH_BIN_ARGS", env), ...ghArgs] };
+}
+
+function envArgs(name: string, env: NodeJS.ProcessEnv): string[] {
+  const value = env[name];
+  if (!value) return [];
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+    throw new Error(`${name} must be a JSON string array`);
+  }
+  return parsed;
 }
 
 function githubPathWithQueryDefaults(

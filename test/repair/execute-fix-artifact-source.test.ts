@@ -3,9 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+function readText(filePath: string): string {
+  return fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+}
+
 test("no-op automerge repair updates outcome and re-enters router before exit", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const noPlannedBranch = source.match(
     /if \(plannedFixActions\.length === 0\) \{(?<body>[\s\S]*?)\n\}/,
   )?.groups?.body;
@@ -30,7 +34,7 @@ test("no-op automerge repair updates outcome and re-enters router before exit", 
 
 test("repair source branch writability preflight runs before expensive repair preflights", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
 
   const branchPreflightIndex = source.indexOf(
     "const sourceBranchPreflight = preflightRepairSourceBranchWrite(fixArtifact);",
@@ -53,7 +57,7 @@ test("repair source branch writability preflight runs before expensive repair pr
 
 test("repair branch pushes settle and re-check the exact source head", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const pushStart = source.indexOf("function pushRepairBranchAndUpdateStatus(");
   const pushEnd = source.indexOf("function repairPushSettleSeconds()", pushStart);
   assert.notEqual(pushStart, -1);
@@ -83,7 +87,7 @@ test("repair branch pushes settle and re-check the exact source head", () => {
 
 test("merged source replacement skip runs before publishing replacement PRs", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
 
   const preparedStart = source.indexOf("function openReplacementPrFromPreparedRepairCheckout(");
   const preparedEnd = source.indexOf("function executeReplacementBranch(", preparedStart);
@@ -124,7 +128,7 @@ test("merged source replacement skip runs before publishing replacement PRs", ()
 
 test("terminal Codex failures do not request repair requeue", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const helperStart = source.indexOf("function isRetryableCodexFailure(");
   const helperEnd = source.indexOf("function isBlockedFixError(", helperStart);
 
@@ -146,7 +150,7 @@ test("terminal Codex failures do not request repair requeue", () => {
 
 test("repair Codex heartbeat wrapper uses bounded process capture", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const helperStart = source.indexOf("function spawnCodexSyncWithHeartbeat(");
   const helperEnd = source.indexOf("function startCodexHeartbeat(", helperStart);
 
@@ -162,10 +166,7 @@ test("repair Codex heartbeat wrapper uses bounded process capture", () => {
 });
 
 test("issue implementation rechecks opt-out labels immediately before branch pushes", () => {
-  const source = fs.readFileSync(
-    path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"),
-    "utf8",
-  );
+  const source = readText(path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"));
   const pushStart = source.indexOf("function pushRecoverableBranch(");
   const pushEnd = source.indexOf("function fetchRemoteRecoverableBranch(", pushStart);
   const helperStart = source.indexOf("function assertIssueImplementationNotPaused(");

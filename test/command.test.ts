@@ -142,7 +142,7 @@ test("managed local review checkout fetches the pull request ref", () => {
       pullSha,
     );
     assert.ok(existsSync(join(targetDir, "feature.txt")));
-    assert.equal(readFileSync(join(targetDir, "feature.txt"), "utf8"), "from pr\n");
+    assert.equal(normalizeLf(readFileSync(join(targetDir, "feature.txt"), "utf8")), "from pr\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -167,7 +167,7 @@ test("local exact review explains when GitHub item is not open", () => {
     execFileSync("git", ["push", "origin", "main"], { cwd: targetDir, stdio: "ignore" });
 
     mkdirSync(binDir);
-    const ghPath = join(binDir, "gh");
+    const ghPath = join(binDir, "gh.js");
     writeFileSync(
       ghPath,
       `#!/usr/bin/env node
@@ -217,7 +217,12 @@ process.exit(1);
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` },
+        env: {
+          ...process.env,
+          GH_BIN: process.execPath,
+          GH_BIN_ARGS: JSON.stringify([ghPath]),
+          PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
       },
     );
 
@@ -254,7 +259,7 @@ test("local exact review labels Codex failures without a stack trace", () => {
     execFileSync("git", ["push", "origin", "main"], { cwd: targetDir, stdio: "ignore" });
 
     mkdirSync(binDir);
-    const ghPath = join(binDir, "gh");
+    const ghPath = join(binDir, "gh.js");
     writeFileSync(
       ghPath,
       `#!/usr/bin/env node
@@ -343,7 +348,13 @@ process.stdin.on("end", () => process.exit(1));
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` },
+        env: {
+          ...process.env,
+          CODEX_BIN: codexPath,
+          GH_BIN: process.execPath,
+          GH_BIN_ARGS: JSON.stringify([ghPath]),
+          PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
       },
     );
 
@@ -363,3 +374,7 @@ process.stdin.on("end", () => process.exit(1));
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function normalizeLf(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}

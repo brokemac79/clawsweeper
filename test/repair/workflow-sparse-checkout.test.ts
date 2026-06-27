@@ -22,9 +22,13 @@ const SPARSE_REPAIR_BUILD_WORKFLOWS = [
   ".github/workflows/spam-scanner.yml",
 ] as const;
 
+function readText(filePath: string): string {
+  return fs.readFileSync(path.join(process.cwd(), filePath), "utf8").replace(/\r\n/g, "\n");
+}
+
 test("sparse repair build workflows include runtime dependencies", () => {
   for (const workflowPath of SPARSE_REPAIR_BUILD_WORKFLOWS) {
-    const workflow = fs.readFileSync(path.join(process.cwd(), workflowPath), "utf8");
+    const workflow = readText(workflowPath);
     assert.match(workflow, /build-script: build:repair/);
 
     const entries = sparseCheckoutEntries(workflow);
@@ -43,10 +47,7 @@ test("repair build emits the bounded Codex process worker", () => {
 });
 
 test("repair comment router workflow preserves repository dispatch target branch", () => {
-  const workflow = fs.readFileSync(
-    path.join(process.cwd(), ".github/workflows/repair-comment-router.yml"),
-    "utf8",
-  );
+  const workflow = readText(".github/workflows/repair-comment-router.yml");
 
   assert.match(workflow, /target_branch:\n\s+description:/);
   assert.match(
@@ -64,7 +65,7 @@ test("repair comment router workflow preserves repository dispatch target branch
 });
 
 test("sweep workflow preserves workflow dispatch target branch", () => {
-  const workflow = fs.readFileSync(path.join(process.cwd(), ".github/workflows/sweep.yml"), "utf8");
+  const workflow = readText(".github/workflows/sweep.yml");
   const dispatchTargetBranchResolver =
     /target_branch="\$\{\{ github\.event_name == 'workflow_dispatch' && github\.event\.inputs\.target_branch \|\| github\.event\.client_payload\.target_branch \|\| 'main' \}\}"/g;
   const continuationTargetBranch =
