@@ -545,6 +545,74 @@ test("repair apply includes recent covering PR comments in coverage proof", () =
   }
 });
 
+test("repair apply bounds covering PR comments when issue comment count is absent", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-apply-result-"));
+  try {
+    const paths = writeApplyFixture(tmp, {
+      action: "close_duplicate",
+      classification: "duplicate",
+      canonical: "#202",
+    });
+    writeFakeGh(paths.binDir, {
+      issues: {
+        101: issue({ number: 101, title: "Add config validation", pullRequest: true }),
+        202: issue({
+          number: 202,
+          title: "Rewrite config validation",
+          pullRequest: true,
+          labels: ["proof: sufficient"],
+        }),
+      },
+      pulls: {
+        101: pull({ number: 101, title: "Add config validation" }),
+        202: pull({ number: 202, title: "Rewrite config validation" }),
+      },
+      comments: {
+        101: [comment("alice", "PR A keeps legacy config behavior intact.")],
+        202: Array.from({ length: 160 }, (_, index) =>
+          comment(
+            "bob",
+            index === 159
+              ? "Recent discussion: PR B carries forward the legacy behavior."
+              : `Older discussion ${index}`,
+          ),
+        ),
+      },
+      omitIssueCommentCounts: [202],
+      logPath: paths.ghLogPath,
+    });
+    writeFakeCodex(paths.binDir);
+
+    runApplyResult(paths, {
+      proofDecision: "covered",
+      expectedPromptIncludes: "Recent discussion: PR B carries forward the legacy behavior.",
+    });
+
+    const report = JSON.parse(fs.readFileSync(paths.reportPath, "utf8"));
+    assert.equal(report.actions[0].status, "executed");
+    assert.equal(hasPrCloseCall(paths.ghLogPath), true);
+    const coveringCommentFetches = ghCalls(paths.ghLogPath).filter(
+      (call) =>
+        call.args[0] === "api" &&
+        call.args.some((arg) => arg.includes("/issues/202/comments")) &&
+        !call.args.includes("--method"),
+    );
+    assert.equal(
+      coveringCommentFetches.some((call) => call.args.includes("--slurp")),
+      false,
+    );
+    assert.equal(coveringCommentFetches.length, 2);
+    assert.ok(coveringCommentFetches.every((call) => call.args.includes("-i")));
+    assert.ok(
+      coveringCommentFetches.every((call) =>
+        call.args.some((arg) => /[?&]per_page=100(?:&|$)/.test(arg)),
+      ),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("repair apply blocks PR close when open covering PR lacks positive proof", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-apply-result-"));
   try {
@@ -1137,6 +1205,7 @@ type FakeGhData = {
   issues: Record<number, Record<string, unknown>>;
   pulls: Record<number, Record<string, unknown>>;
   comments: Record<number, Record<string, unknown>[]>;
+  omitIssueCommentCounts?: number[];
   prViewFailure?: { number: number; message: string };
   afterProofPath?: string;
   postProofIssues?: Record<number, Record<string, unknown>>;
@@ -1229,42 +1298,77 @@ function runApplyResult(
 ) {
   const args = ["dist/repair/apply-result.js", paths.jobPath, paths.resultPath];
   if (options.allowMissingUpdatedAt) args.push("--allow-missing-updated-at");
+  const env = applyResultEnv(paths, options);
   execFileSync(process.execPath, args, {
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      CLAWSWEEPER_ALLOW_EXECUTE: "1",
-      CLAWSWEEPER_ALLOWED_OWNER: "openclaw",
-      CLAWSWEEPER_MODEL: "model-test",
-      CLAWSWEEPER_PR_CLOSE_COVERAGE_PROOF_TIMEOUT_MS: "10000",
-      GH_TOKEN: "write-token",
-      PATH: `${paths.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      PR_CLOSE_COVERAGE_PROOF_DECISION: options.proofDecision,
-      PR_CLOSE_COVERAGE_PROOF_EXPECT_PROMPT: options.expectedPromptIncludes ?? "",
-      PR_CLOSE_COVERAGE_PROOF_UNEXPECTED_PROMPT: options.unexpectedPromptIncludes ?? "",
-      PR_CLOSE_COVERAGE_PROOF_FAIL_IF_INVOKED: options.failIfProofRuns ? "1" : "",
-      PR_CLOSE_COVERAGE_PROOF_FAILURE_MESSAGE: options.proofFailureMessage ?? "",
-      PR_CLOSE_COVERAGE_PROOF_AFTER_PROOF_PATH: options.afterProofPath ?? "",
-    },
+    env,
     stdio: "pipe",
   });
 }
 
+function applyResultEnv(
+  paths: ApplyFixturePaths,
+  options: Parameters<typeof runApplyResult>[1],
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAWSWEEPER_ALLOW_EXECUTE: "1",
+    CLAWSWEEPER_ALLOWED_OWNER: "openclaw",
+    CLAWSWEEPER_MODEL: "model-test",
+    CLAWSWEEPER_PR_CLOSE_COVERAGE_PROOF_TIMEOUT_MS: "10000",
+    GH_TOKEN: "write-token",
+    PR_CLOSE_COVERAGE_PROOF_DECISION: options.proofDecision,
+    PR_CLOSE_COVERAGE_PROOF_EXPECT_PROMPT: options.expectedPromptIncludes ?? "",
+    PR_CLOSE_COVERAGE_PROOF_UNEXPECTED_PROMPT: options.unexpectedPromptIncludes ?? "",
+    PR_CLOSE_COVERAGE_PROOF_FAIL_IF_INVOKED: options.failIfProofRuns ? "1" : "",
+    PR_CLOSE_COVERAGE_PROOF_FAILURE_MESSAGE: options.proofFailureMessage ?? "",
+    PR_CLOSE_COVERAGE_PROOF_AFTER_PROOF_PATH: options.afterProofPath ?? "",
+  };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  const testPath = `${paths.binDir}${path.delimiter}${env[pathKey] ?? ""}`;
+  env[pathKey] = testPath;
+  env.PATH = testPath;
+  if (process.platform === "win32") {
+    env.NODE_OPTIONS = prependNodeRequireOption(
+      env.NODE_OPTIONS,
+      path.join(paths.binDir, "fake-gh-preload.cjs"),
+    );
+  }
+  return env;
+}
+
+function prependNodeRequireOption(existing: string | undefined, modulePath: string): string {
+  const normalizedPath = process.platform === "win32" ? modulePath.replace(/\\/g, "/") : modulePath;
+  const requireOption = `--require=${JSON.stringify(normalizedPath)}`;
+  return existing ? `${requireOption} ${existing}` : requireOption;
+}
+
 function writeFakeGh(binDir: string, data: FakeGhData) {
+  const ghScriptPath = path.join(binDir, process.platform === "win32" ? "gh.js" : "gh");
   fs.writeFileSync(
-    path.join(binDir, "gh"),
+    ghScriptPath,
     `#!/usr/bin/env node
-	const fs = require("node:fs");
-const args = process.argv.slice(2);
+const fs = require("node:fs");
+const path = require("node:path");
+const windowsPreloadedGh = path.basename(process.execPath).toLowerCase() === "gh.exe";
+const args = process.argv.slice(windowsPreloadedGh ? 1 : 2);
+if (windowsPreloadedGh && args[0]) {
+  args[0] = path.basename(args[0]);
+}
 const data = ${JSON.stringify(data)};
 fs.appendFileSync(data.logPath, JSON.stringify({ args }) + "\\n");
+const includeHeaders = args[0] === "api" && args[1] === "-i";
 
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
 
+function writeWithHeaders(value, headers = []) {
+  process.stdout.write(["HTTP/2 200", ...headers, "", JSON.stringify(value)].join("\\r\\n"));
+}
+
 if (args[0] === "api") {
-  const apiPath = args[1] || "";
+  const apiPath = includeHeaders ? args[2] || "" : args[1] || "";
   const url = new URL(apiPath, "https://api.github.test/");
   let match = url.pathname.match(/\\/issues\\/(\\d+)\\/comments$/);
   if (match) {
@@ -1281,7 +1385,24 @@ if (args[0] === "api") {
       const perPage = Number(url.searchParams.get("per_page") || comments.length || 100);
       const page = Number(url.searchParams.get("page") || "1");
       const start = Math.max(0, page - 1) * perPage;
-      write(comments.slice(start, start + perPage));
+      const pageComments = comments.slice(start, start + perPage);
+      if (includeHeaders) {
+        const lastPage = Math.max(1, Math.ceil(comments.length / Math.max(1, perPage)));
+        const links = [];
+        if (page < lastPage) {
+          const next = new URL(url.toString());
+          next.searchParams.set("page", String(page + 1));
+          links.push("<" + next.toString() + ">; rel=\\"next\\"");
+        }
+        if (lastPage > 1) {
+          const last = new URL(url.toString());
+          last.searchParams.set("page", String(lastPage));
+          links.push("<" + last.toString() + ">; rel=\\"last\\"");
+        }
+        writeWithHeaders(pageComments, links.length ? ["link: " + links.join(", ")] : []);
+      } else {
+        write(pageComments);
+      }
     }
     process.exit(0);
   }
@@ -1307,7 +1428,9 @@ if (args[0] === "api") {
 		    ...issue,
 		    ...(postProofIssue ? postProofIssue : {}),
 		    ...(postProofUpdatedAt ? { updated_at: postProofUpdatedAt } : {}),
-		    comments: data.comments[number]?.length || 0,
+		    ...((data.omitIssueCommentCounts || []).includes(number)
+		      ? {}
+		      : { comments: data.comments[number]?.length || 0 }),
 		  });
 	  process.exit(0);
 	}
@@ -1377,6 +1500,19 @@ process.exit(1);
 `,
     { mode: 0o755 },
   );
+  if (process.platform === "win32") {
+    fs.copyFileSync(process.execPath, path.join(binDir, "gh.exe"));
+    fs.writeFileSync(
+      path.join(binDir, "fake-gh-preload.cjs"),
+      `const path = require("node:path");
+if (path.basename(process.execPath).toLowerCase() === "gh.exe") {
+  require(path.join(__dirname, "gh.js"));
+  process.exit(process.exitCode || 0);
+}
+`,
+      "utf8",
+    );
+  }
 }
 
 function writeFakeCodex(binDir: string) {

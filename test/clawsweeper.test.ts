@@ -420,6 +420,13 @@ if (args[0] === "api" && /\\/issues\\/comments\\/\\d+$/.test(path)) {
       calls.some((args) => args.some((arg) => arg.includes("/issues/322"))),
       false,
     );
+    const reviewCommentListFetches = calls.filter(
+      (args) =>
+        args[0] === "api" &&
+        (args[1] ?? "").includes("/issues/321/comments") &&
+        args.includes("--paginate"),
+    );
+    assert.equal(reviewCommentListFetches.length, 1);
     assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), [
       {
         number: 321,
@@ -439,6 +446,229 @@ if (args[0] === "api" && /\\/issues\\/comments\\/\\d+$/.test(path)) {
     assert.doesNotMatch(patchedComment, /remove `clawsweeper:linked-pr-open`/);
     assert.doesNotMatch(patchedComment, /remove `clawsweeper:no-new-fix-pr`/);
     assert.match(readFileSync(join(itemsDir, "321.md"), "utf8"), /^labels_synced_at: /m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apply-decisions falls back to comment lookup after malformed mutation response", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    const logPath = join(root, "gh.log");
+    const patchedBodyPath = join(root, "patched-comment-body.txt");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+
+    const report = workPlanCandidateReport({
+      number: 321,
+      reviewed_at: "2026-05-01T00:05:00Z",
+      item_snapshot_hash: "reviewed-snapshot-321",
+      item_updated_at: "2026-05-01T00:00:00Z",
+      triage_priority: "P1",
+    });
+    writeFileSync(join(itemsDir, "321.md"), report, "utf8");
+    const placeholder = renderReviewStartStatusComment({
+      number: 321,
+      kind: "issue",
+      title: "Render work plans",
+    });
+
+    const ghMock = `
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("fs");
+const logPath = ${JSON.stringify(logPath)};
+const patchedBodyPath = ${JSON.stringify(patchedBodyPath)};
+const placeholder = ${JSON.stringify(placeholder)};
+const rawArgs = process.argv.slice(2);
+const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
+appendFileSync(logPath, JSON.stringify(args) + "\\n");
+const path = args.includes("-i") ? args[args.indexOf("-i") + 1] : args[1] || "";
+const commentMatch = path.match(/\\/issues\\/(\\d+)\\/comments(?:\\?|$)/);
+const issueMatch = path.match(/\\/issues\\/(\\d+)$/);
+if (args[0] === "api" && /\\/issues\\/comments\\/\\d+$/.test(path)) {
+  const inputPath = args[args.indexOf("--input") + 1];
+  const body = JSON.parse(readFileSync(inputPath, "utf8")).body;
+  writeFileSync(patchedBodyPath, body, "utf8");
+  appendFileSync(logPath, JSON.stringify(["comment-patch", body]) + "\\n");
+  process.stdout.write("{not-json");
+} else if (args[0] === "api" && commentMatch) {
+  const body = existsSync(patchedBodyPath) ? readFileSync(patchedBodyPath, "utf8") : placeholder;
+  console.log(JSON.stringify([[{
+    id: 9321,
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321#issuecomment-9321",
+    created_at: "2026-05-01T00:01:00Z",
+    updated_at: "2026-05-01T00:06:00Z",
+    user: { login: "clawsweeper[bot]" },
+    body
+  }]]));
+} else if (args[0] === "api" && /\\/issues\\/321\\/timeline/.test(path)) {
+  console.log(JSON.stringify([{
+    id: 1,
+    event: "commented",
+    created_at: "2026-05-01T00:01:00Z",
+    actor: { login: "clawsweeper[bot]" }
+  }]));
+} else if (args[0] === "api" && issueMatch) {
+  console.log(JSON.stringify({
+    number: 321,
+    title: "Render work plans",
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:01:01Z",
+    closed_at: null,
+    state: "open",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: [],
+    comments: 1,
+    pull_request: null
+  }));
+} else if (args[0] === "issue" && args[1] === "view") {
+  console.log(JSON.stringify({ closedByPullRequestsReferences: [] }));
+} else if (args[0] === "label" && args[1] === "create") {
+  console.log("");
+} else if (args[0] === "issue" && args[1] === "edit") {
+  console.log("");
+} else {
+  console.error("unexpected gh args", JSON.stringify(args));
+  process.exit(1);
+}
+`;
+    withMockGh(root, ghMock, () => {
+      runApplyDecisionsForTest({ itemsDir, closedDir, plansDir, reportPath });
+    });
+
+    const calls = readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as string[]);
+    const reviewCommentListFetches = calls.filter(
+      (args) =>
+        args[0] === "api" &&
+        (args[1] ?? "").includes("/issues/321/comments") &&
+        args.includes("--paginate"),
+    );
+    assert.equal(reviewCommentListFetches.length, 2);
+    assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), [
+      {
+        number: 321,
+        action: "review_comment_synced",
+        reason: "updated durable Codex review comment",
+      },
+    ]);
+    assert.match(readFileSync(join(itemsDir, "321.md"), "utf8"), /^review_comment_synced_at: /m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apply-decisions rejects stale fallback after malformed mutation response", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    const logPath = join(root, "gh.log");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+
+    const report = workPlanCandidateReport({
+      number: 321,
+      reviewed_at: "2026-05-01T00:05:00Z",
+      item_snapshot_hash: "reviewed-snapshot-321",
+      item_updated_at: "2026-05-01T00:00:00Z",
+      triage_priority: "P1",
+    });
+    writeFileSync(join(itemsDir, "321.md"), report, "utf8");
+    const placeholder = renderReviewStartStatusComment({
+      number: 321,
+      kind: "issue",
+      title: "Render work plans",
+    });
+
+    const ghMock = `
+const { appendFileSync, readFileSync } = require("fs");
+const logPath = ${JSON.stringify(logPath)};
+const placeholder = ${JSON.stringify(placeholder)};
+const rawArgs = process.argv.slice(2);
+const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
+appendFileSync(logPath, JSON.stringify(args) + "\\n");
+const path = args.includes("-i") ? args[args.indexOf("-i") + 1] : args[1] || "";
+const commentMatch = path.match(/\\/issues\\/(\\d+)\\/comments(?:\\?|$)/);
+const issueMatch = path.match(/\\/issues\\/(\\d+)$/);
+if (args[0] === "api" && /\\/issues\\/comments\\/\\d+$/.test(path)) {
+  const inputPath = args[args.indexOf("--input") + 1];
+  const body = JSON.parse(readFileSync(inputPath, "utf8")).body;
+  appendFileSync(logPath, JSON.stringify(["comment-patch", body]) + "\\n");
+  process.stdout.write("{not-json");
+} else if (args[0] === "api" && commentMatch) {
+  console.log(JSON.stringify([[{
+    id: 9321,
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321#issuecomment-9321",
+    created_at: "2026-05-01T00:01:00Z",
+    updated_at: "2026-05-01T00:01:00Z",
+    user: { login: "clawsweeper[bot]" },
+    body: placeholder
+  }]]));
+} else if (args[0] === "api" && /\\/issues\\/321\\/timeline/.test(path)) {
+  console.log(JSON.stringify([{
+    id: 1,
+    event: "commented",
+    created_at: "2026-05-01T00:01:00Z",
+    actor: { login: "clawsweeper[bot]" }
+  }]));
+} else if (args[0] === "api" && issueMatch) {
+  console.log(JSON.stringify({
+    number: 321,
+    title: "Render work plans",
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:01:01Z",
+    closed_at: null,
+    state: "open",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: [],
+    comments: 1,
+    pull_request: null
+  }));
+} else if (args[0] === "issue" && args[1] === "view") {
+  console.log(JSON.stringify({ closedByPullRequestsReferences: [] }));
+} else if (args[0] === "label" && args[1] === "create") {
+  console.log("");
+} else if (args[0] === "issue" && args[1] === "edit") {
+  console.log("");
+} else {
+  console.error("unexpected gh args", JSON.stringify(args));
+  process.exit(1);
+}
+`;
+    assert.throws(
+      () => {
+        withMockGh(root, ghMock, () => {
+          runApplyDecisionsForTest({ itemsDir, closedDir, plansDir, reportPath });
+        });
+      },
+      (error) => {
+        assert.match(String(error), /did not return or expose the synced review comment/);
+        return true;
+      },
+    );
+
+    assert.equal(existsSync(reportPath), false);
+    assert.doesNotMatch(
+      readFileSync(join(itemsDir, "321.md"), "utf8"),
+      /^review_comment_synced_at: /m,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
