@@ -162,7 +162,6 @@ jobs:
           else
             cursor_arg=(--cursor-path "results/proof-nudge-cursors/${target_slug}.json")
             bot_cursor_arg=(--cursor-path "results/bot-proof-cursors/${target_slug}.json")
-            cursor_publish_args=(--path results/proof-nudge-cursors)
           fi
           pnpm run proof-nudges -- \
             --target-repo "$TARGET_REPO" \
@@ -174,14 +173,14 @@ jobs:
             "${item_numbers_arg[@]}" \
             "${cursor_arg[@]}" \
             "${execute_arg[@]}"
+          if [ "$PROOF_NUDGES_EXECUTE" = "true" ] && [ -d results/proof-nudge-cursors ]; then
+            cursor_publish_args+=(--path results/proof-nudge-cursors)
+          fi
 
           if [ "$BOT_PROOF_ENABLED" = "true" ]; then
             bot_proof_execute_arg=()
             if [ "$BOT_PROOF_EXECUTE" = "true" ]; then
               bot_proof_execute_arg=(--execute)
-            fi
-            if [ ${#bot_cursor_arg[@]} -gt 0 ]; then
-              cursor_publish_args+=(--path results/bot-proof-cursors)
             fi
             pnpm run bot-proof -- \
               --target-repo "$TARGET_REPO" \
@@ -191,6 +190,9 @@ jobs:
               "${item_numbers_arg[@]}" \
               "${bot_cursor_arg[@]}" \
               "${bot_proof_execute_arg[@]}"
+            if [ "$BOT_PROOF_EXECUTE" = "true" ] && [ -d results/bot-proof-cursors ]; then
+              cursor_publish_args+=(--path results/bot-proof-cursors)
+            fi
           fi
           if [ ${#cursor_publish_args[@]} -gt 0 ]; then
             pnpm run repair:publish-main -- \

@@ -282,6 +282,38 @@ test("proof nudge workflow is manual-first and scheduled behind repo vars", () =
   assert.match(job, /results\/bot-proof-cursors/);
 });
 
+test("proof nudge workflow publishes cursors only for executed lanes", () => {
+  const workflow = readFileSync(".github/workflows/proof-nudges.yml", "utf8");
+  const job = workflow.slice(workflow.indexOf("  proof-nudges:"), workflow.length);
+  const untargetedCursorStart = job.indexOf(
+    'cursor_arg=(--cursor-path "results/proof-nudge-cursors/${target_slug}.json")',
+  );
+  const proofRunStart = job.indexOf("pnpm run proof-nudges", untargetedCursorStart);
+  const botEnabledStart = job.indexOf('if [ "$BOT_PROOF_ENABLED" = "true" ]; then', proofRunStart);
+  const publishStart = job.indexOf("pnpm run repair:publish-main", botEnabledStart);
+
+  assert.notEqual(untargetedCursorStart, -1);
+  assert.notEqual(proofRunStart, -1);
+  assert.notEqual(botEnabledStart, -1);
+  assert.notEqual(publishStart, -1);
+
+  const cursorSetup = job.slice(untargetedCursorStart, proofRunStart);
+  const proofAfterRun = job.slice(proofRunStart, botEnabledStart);
+  const botBlock = job.slice(botEnabledStart, publishStart);
+
+  assert.doesNotMatch(cursorSetup, /cursor_publish_args/);
+  assert.match(
+    proofAfterRun,
+    /if \[ "\$PROOF_NUDGES_EXECUTE" = "true" \] && \[ -d results\/proof-nudge-cursors \]/,
+  );
+  assert.match(proofAfterRun, /cursor_publish_args\+=\(--path results\/proof-nudge-cursors\)/);
+  assert.match(
+    botBlock,
+    /if \[ "\$BOT_PROOF_EXECUTE" = "true" \] && \[ -d results\/bot-proof-cursors \]/,
+  );
+  assert.match(botBlock, /cursor_publish_args\+=\(--path results\/bot-proof-cursors\)/);
+});
+
 test("read-only checkout mode restores file modes and leaves git metadata writable", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
