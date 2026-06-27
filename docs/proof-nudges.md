@@ -106,6 +106,11 @@ processed candidate, so later runs inspect the next bounded window instead of
 repeating the same prefix. Targeted `--item-numbers` runs do not use or update
 those cursors.
 
+The workflow publishes only the exact target cursor files, for example
+`results/proof-nudge-cursors/openclaw-openclaw.json`, and only after the
+corresponding lane executed and wrote that file. Dry-runs do not publish cursor
+paths, and one target repo run does not replace another target's cursor file.
+
 Suggested rollout:
 
 1. Run the proof-nudge workflow manually with `execute=false`.

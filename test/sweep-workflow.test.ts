@@ -282,7 +282,7 @@ test("proof nudge workflow is manual-first and scheduled behind repo vars", () =
   assert.match(job, /results\/bot-proof-cursors/);
 });
 
-test("proof nudge workflow publishes cursors only for executed lanes", () => {
+test("proof nudge workflow publishes exact cursor files only for executed lanes", () => {
   const workflow = readFileSync(".github/workflows/proof-nudges.yml", "utf8");
   const job = workflow.slice(workflow.indexOf("  proof-nudges:"), workflow.length);
   const untargetedCursorStart = job.indexOf(
@@ -304,14 +304,23 @@ test("proof nudge workflow publishes cursors only for executed lanes", () => {
   assert.doesNotMatch(cursorSetup, /cursor_publish_args/);
   assert.match(
     proofAfterRun,
-    /if \[ "\$PROOF_NUDGES_EXECUTE" = "true" \] && \[ -d results\/proof-nudge-cursors \]/,
+    /proof_cursor_path="results\/proof-nudge-cursors\/\$\{target_slug\}\.json"/,
   );
-  assert.match(proofAfterRun, /cursor_publish_args\+=\(--path results\/proof-nudge-cursors\)/);
   assert.match(
-    botBlock,
-    /if \[ "\$BOT_PROOF_EXECUTE" = "true" \] && \[ -d results\/bot-proof-cursors \]/,
+    proofAfterRun,
+    /if \[ "\$PROOF_NUDGES_EXECUTE" = "true" \] && \[ -f "\$proof_cursor_path" \]/,
   );
-  assert.match(botBlock, /cursor_publish_args\+=\(--path results\/bot-proof-cursors\)/);
+  assert.match(proofAfterRun, /cursor_publish_args\+=\(--path "\$proof_cursor_path"\)/);
+  assert.doesNotMatch(
+    proofAfterRun,
+    /cursor_publish_args\+=\(--path results\/proof-nudge-cursors\)/,
+  );
+  assert.doesNotMatch(proofAfterRun, /\[ -d results\/proof-nudge-cursors \]/);
+  assert.match(botBlock, /bot_cursor_path="results\/bot-proof-cursors\/\$\{target_slug\}\.json"/);
+  assert.match(botBlock, /if \[ "\$BOT_PROOF_EXECUTE" = "true" \] && \[ -f "\$bot_cursor_path" \]/);
+  assert.match(botBlock, /cursor_publish_args\+=\(--path "\$bot_cursor_path"\)/);
+  assert.doesNotMatch(botBlock, /cursor_publish_args\+=\(--path results\/bot-proof-cursors\)/);
+  assert.doesNotMatch(botBlock, /\[ -d results\/bot-proof-cursors \]/);
 });
 
 test("read-only checkout mode restores file modes and leaves git metadata writable", () => {
