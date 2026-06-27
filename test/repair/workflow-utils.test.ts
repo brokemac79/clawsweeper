@@ -17,6 +17,7 @@ import {
   plannedItemNumberCsv,
   proposedItemNumbers,
   proposedPrCloseCoverageItemNumbers,
+  writeApplyCursor,
   writeCommentSyncCursor,
 } from "../../dist/repair/workflow-utils.js";
 import {
@@ -862,6 +863,112 @@ test("workflow utilities select gated product-direction PR close proposals", () 
   );
 });
 
+test("workflow utilities rotate bounded apply candidate batches by apply cursor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
+  const oldDate = "2024-01-01T00:00:00Z";
+  const cursorPath = path.join(root, "results/apply-cursors/openclaw-openclaw.json");
+  writeProposedRecord(root, 10, "issue", "proposed_close", "implemented_on_main", oldDate, {
+    applyCheckedAt: "2026-01-02T00:00:00Z",
+  });
+  writeProposedRecord(root, 20, "issue", "proposed_close", "implemented_on_main", oldDate);
+  writeProposedRecord(root, 30, "issue", "proposed_close", "implemented_on_main", oldDate, {
+    applyCheckedAt: "2026-01-01T00:00:00Z",
+  });
+  writeProposedRecord(root, 40, "issue", "proposed_close", "implemented_on_main", oldDate, {
+    applyCheckedAt: "2026-01-03T00:00:00Z",
+  });
+
+  const options = {
+    targetRepo: "openclaw/openclaw",
+    applyKind: "all",
+    applyCloseReasons: "all",
+    staleMinAgeDays: 60,
+    minAgeDays: 0,
+    minAgeMinutes: null,
+    batchSize: 2,
+    cursorPath,
+  };
+
+  assert.deepEqual(
+    withCwd(root, () => proposedItemNumbers(options)),
+    [20, 30],
+  );
+
+  write(
+    cursorPath,
+    `${JSON.stringify(
+      {
+        target_repo: "openclaw/openclaw",
+        next_after_number: 30,
+        next_after_apply_checked_at: "2026-01-01T00:00:00Z",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  assert.deepEqual(
+    withCwd(root, () => proposedItemNumbers(options)),
+    [10, 40],
+  );
+
+  write(
+    cursorPath,
+    `${JSON.stringify(
+      {
+        target_repo: "openclaw/openclaw",
+        next_after_number: 40,
+        next_after_apply_checked_at: "2026-01-03T00:00:00Z",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  assert.deepEqual(
+    withCwd(root, () => proposedItemNumbers(options)),
+    [20, 30],
+  );
+});
+
+test("workflow utilities write apply cursor from the last processed report item", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
+  const cursorPath = path.join(root, "results/apply-cursors/openclaw-openclaw.json");
+  const reportPath = path.join(root, ".artifacts/apply-reports/apply-report-1.json");
+  const oldDate = "2024-01-01T00:00:00Z";
+  writeProposedRecord(root, 10, "issue", "proposed_close", "implemented_on_main", oldDate, {
+    applyCheckedAt: "2026-01-01T00:00:00Z",
+  });
+  writeProposedRecord(root, 20, "issue", "proposed_close", "implemented_on_main", oldDate, {
+    applyCheckedAt: "2026-01-02T00:00:00Z",
+  });
+  write(
+    reportPath,
+    `${JSON.stringify(
+      [
+        { number: 10, action: "kept_open", reason: "first" },
+        { number: 20, action: "kept_open", reason: "second" },
+      ],
+      null,
+      2,
+    )}\n`,
+  );
+
+  assert.deepEqual(
+    withCwd(root, () => writeApplyCursor(cursorPath, reportPath, "openclaw/openclaw")),
+    {
+      processed_count: "2",
+      next_cursor_number: "20",
+      next_cursor_apply_checked_at: "2026-01-02T00:00:00Z",
+    },
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(cursorPath, "utf8")), {
+    target_repo: "openclaw/openclaw",
+    next_after_number: 20,
+    next_after_apply_checked_at: "2026-01-02T00:00:00Z",
+    processed_count: 2,
+    updated_at: JSON.parse(fs.readFileSync(cursorPath, "utf8")).updated_at,
+  });
+});
+
 test("workflow utilities select cursor-based PR comment sync batches", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
   const cursorPath = path.join(root, "results/comment-sync-cursors/openclaw-openclaw.json");
@@ -945,21 +1052,30 @@ function write(file, content) {
   fs.writeFileSync(file, content);
 }
 
-function writeProposedRecord(root, number, type, actionTaken, closeReason, itemCreatedAt) {
+function writeProposedRecord(
+  root,
+  number,
+  type,
+  actionTaken,
+  closeReason,
+  itemCreatedAt,
+  options = {},
+) {
+  const lines = [
+    "---",
+    "repository: openclaw/openclaw",
+    `type: ${type}`,
+    "decision: close",
+    "confidence: high",
+    `action_taken: ${actionTaken}`,
+    `close_reason: ${closeReason}`,
+    `item_created_at: ${itemCreatedAt}`,
+  ];
+  if (options.applyCheckedAt) lines.push(`apply_checked_at: ${options.applyCheckedAt}`);
+  lines.push("---", "");
   write(
     path.join(root, `records/openclaw-openclaw/items/openclaw-openclaw-${number}.md`),
-    [
-      "---",
-      "repository: openclaw/openclaw",
-      `type: ${type}`,
-      "decision: close",
-      "confidence: high",
-      `action_taken: ${actionTaken}`,
-      `close_reason: ${closeReason}`,
-      `item_created_at: ${itemCreatedAt}`,
-      "---",
-      "",
-    ].join("\n"),
+    lines.join("\n"),
   );
 }
 
