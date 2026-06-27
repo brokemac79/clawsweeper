@@ -2171,8 +2171,6 @@ jobs:
             sync_open_pr_batch="true"
             item_numbers=""
           fi
-          explicit_item_numbers="$item_numbers"
-          auto_selected_apply_batch=false
           sync_comments_only="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apply_sync_comments_only || 'false' }}"
           product_direction_enabled=false
           case "${CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED,,}" in
@@ -2261,6 +2259,8 @@ jobs:
             sync_open_pr_batch="true"
             item_numbers=""
           fi
+          explicit_item_numbers="$item_numbers"
+          auto_selected_apply_batch=false
           sync_comments_only="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apply_sync_comments_only || 'false' }}"
           product_direction_enabled=false
           case "${CLAWSWEEPER_UNCONFIRMED_PRODUCT_DIRECTION_CLOSE_ENABLED,,}" in
@@ -2485,11 +2485,12 @@ jobs:
             closed_total=$((closed_total + closed_in_chunk))
             echo "Checkpoint $checkpoint result_count=$result_count closed_in_chunk=$closed_in_chunk closed_total=$closed_total/$limit"
             apply_publish_paths=(records apply-report.json)
-            if [ "$auto_selected_apply_batch" = "true" ] && [ "$result_count" -gt 0 ]; then
+            if [ "$auto_selected_apply_batch" = "true" ]; then
               pnpm run workflow -- write-apply-cursor \
                 --cursor-path "$apply_cursor_path" \
                 --report ".artifacts/apply-reports/apply-report-$checkpoint.json" \
-                --target-repo "$TARGET_REPO"
+                --target-repo "$TARGET_REPO" \
+                --item-numbers "$item_numbers"
               apply_publish_paths+=(results/apply-cursors)
             fi
             publish_changes "chore: apply sweep decisions checkpoint $checkpoint" "${apply_publish_paths[@]}"
@@ -2501,9 +2502,11 @@ jobs:
             publish_status "chore: update sweep apply checkpoint $checkpoint status"
             echo "::endgroup::"
             if [ "$result_count" -ge "$close_processed_limit" ]; then
-              if [ "$auto_selected_apply_batch" = "true" ] || [ "$closed_in_chunk" -gt 0 ]; then
+              if [ "$closed_in_chunk" -gt 0 ]; then
                 echo "Close scan reached its $close_processed_limit-record budget; queueing a fresh-token continuation."
                 continue_apply=true
+              elif [ "$auto_selected_apply_batch" = "true" ]; then
+                echo "Close scan reached its $close_processed_limit-record budget with no fresh closes; cursor is persisted and the next scheduled apply run will advance the next window."
               else
                 echo "Explicit close scan reached its $close_processed_limit-record budget without fresh closes; stopping to avoid a retry loop."
               fi
