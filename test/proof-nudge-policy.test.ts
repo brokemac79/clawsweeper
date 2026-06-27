@@ -11,6 +11,7 @@ import {
   proofNudgeEligibilityForTest,
   renderBotProofDecisionCommentForTest,
   renderProofNudgeCommentForTest,
+  rotateProofLaneCandidatesForTest,
 } from "../dist/clawsweeper.js";
 import { item, tmpPrefix, withMockGh } from "./helpers.ts";
 
@@ -280,6 +281,101 @@ Stored report label snapshots can be older than the live PR labels.
       allCandidates.map((candidate) => candidate.number),
       [41, 42],
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("proof nudge candidate rotation resumes after the cursor", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    writeFileSync(join(root, "41.md"), proofNudgeReport({ reviewedAt: "2026-01-01T00:00:00Z" }));
+    writeFileSync(join(root, "42.md"), proofNudgeReport({ reviewedAt: "2026-01-02T00:00:00Z" }));
+    writeFileSync(join(root, "43.md"), proofNudgeReport({ reviewedAt: "2026-01-03T00:00:00Z" }));
+
+    const candidates = proofNudgeCandidateRecordsForTest(root);
+    assert.deepEqual(
+      rotateProofLaneCandidatesForTest(candidates, {
+        likely: true,
+        number: 42,
+        sortAt: Date.parse("2026-01-02T00:00:00Z"),
+      }).map((candidate) => candidate.number),
+      [43, 41, 42],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("proof nudge execute scans advance cursor to the last processed candidate", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const reportPath = join(root, "proof-nudge-report.json");
+    const cursorPath = join(root, "results", "proof-nudge-cursors", "openclaw-openclaw.json");
+    mkdirSync(itemsDir, { recursive: true });
+    writeFileSync(
+      join(itemsDir, "41.md"),
+      proofNudgeReport({ reviewedAt: "2026-01-01T00:00:00Z" }),
+    );
+    writeFileSync(
+      join(itemsDir, "42.md"),
+      proofNudgeReport({ reviewedAt: "2026-01-02T00:00:00Z" }),
+    );
+    withMockGh(
+      root,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const path = args[1] || "";
+const match = path.match(/\\/issues\\/(41|42)$/);
+if (match) {
+  console.log(JSON.stringify({
+    number: Number(match[1]),
+    title: "Closed proof nudge sample",
+    html_url: "https://github.com/openclaw/openclaw/pull/" + match[1],
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+    closed_at: "2026-01-03T00:00:00Z",
+    state: "closed",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "contributor" },
+    labels: ["triage: needs-real-behavior-proof"],
+    pull_request: {}
+  }));
+  process.exit(0);
+}
+console.error("unexpected gh args: " + args.join(" "));
+process.exit(1);
+`,
+      () => {
+        execFileSync(process.execPath, [
+          "dist/clawsweeper.js",
+          "proof-nudges",
+          "--target-repo",
+          "openclaw/openclaw",
+          "--items-dir",
+          itemsDir,
+          "--limit",
+          "10",
+          "--processed-limit",
+          "2",
+          "--report-path",
+          reportPath,
+          "--cursor-path",
+          cursorPath,
+          "--execute",
+        ]);
+      },
+    );
+
+    const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
+    assert.equal(cursor.repository, "openclaw/openclaw");
+    assert.equal(cursor.lane, "proof_nudges");
+    assert.equal(cursor.next_cursor_number, 42);
+    assert.equal(cursor.next_cursor_likely, true);
+    assert.equal(cursor.reviewed_at, "2026-01-02T00:00:00Z");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
