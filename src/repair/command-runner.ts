@@ -119,12 +119,35 @@ function escapeWindowsCommand(value: string): string {
 }
 
 function escapeWindowsArgument(value: string, doubleEscapeMetaCharacters: boolean): string {
-  let escaped = value.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
-  escaped = escaped.replace(/(?=(\\+?)?)\1$/, "$1$1");
-  escaped = `"${escaped}"`;
+  let escaped = quoteWindowsArgument(value);
   escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
   if (doubleEscapeMetaCharacters) {
     escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
   }
+  return escaped;
+}
+
+function quoteWindowsArgument(value: string): string {
+  let escaped = '"';
+  let backslashes = 0;
+
+  for (const char of value) {
+    if (char === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (char === '"') {
+      escaped += "\\".repeat(backslashes * 2 + 1);
+      escaped += char;
+      backslashes = 0;
+      continue;
+    }
+    escaped += "\\".repeat(backslashes);
+    escaped += char;
+    backslashes = 0;
+  }
+
+  escaped += "\\".repeat(backslashes * 2);
+  escaped += '"';
   return escaped;
 }

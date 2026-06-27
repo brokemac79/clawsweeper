@@ -34,7 +34,7 @@ test("runCommand double-escapes Windows batch launcher arguments", () => {
   try {
     const invocation = commandInvocationForTest(
       "validate",
-      ["space value", "a&b", "paren(x)"],
+      ["space value", "a&b", "paren(x)", "tail\\", 'quote"x'],
       {
         cwd: root,
         env: {
@@ -53,6 +53,8 @@ test("runCommand double-escapes Windows batch launcher arguments", () => {
     assert.match(shellCommand, /\^\^\^"space\^\^\^ value\^\^\^"/);
     assert.match(shellCommand, /\^\^\^"a\^\^\^&b\^\^\^"/);
     assert.match(shellCommand, /\^\^\^"paren\^\^\^\(x\^\^\^\)\^\^\^"/);
+    assert.match(shellCommand, /\^\^\^"tail\\\\\^\^\^"/);
+    assert.match(shellCommand, /\^\^\^"quote\\\^\^\^"x\^\^\^"/);
     assert.equal(invocation.windowsVerbatimArguments, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -75,7 +77,17 @@ test(
     writeFileSync(launcherPath, `@echo off\r\n"${process.execPath}" "%~dp0args.js" %*\r\n`);
 
     try {
-      const args = ["space value", "a&b", "paren(x)", "bang!"];
+      const args = [
+        "space value",
+        "a&b",
+        "paren(x)",
+        "bang!",
+        "tail\\",
+        "double\\\\",
+        "space tail\\",
+        'quote"x',
+        'quote slash\\"',
+      ];
       assert.deepEqual(JSON.parse(runCommand(launcherPath, args)), args);
     } finally {
       rmSync(root, { recursive: true, force: true });
