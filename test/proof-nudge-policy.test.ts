@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -93,6 +93,42 @@ function proofNudgeItem(overrides = {}) {
     activeLockReason: null,
     ...overrides,
   });
+}
+
+function closedProofLaneGhMockScript(numbers: readonly number[]): string {
+  return `#!/usr/bin/env node
+const handled = new Set(${JSON.stringify(numbers)});
+const args = process.argv.slice(2);
+const path = args[1] || "";
+const issueMatch = path.match(/\\/issues\\/(\\d+)$/);
+if (issueMatch && handled.has(Number(issueMatch[1]))) {
+  const number = Number(issueMatch[1]);
+  const bot = number >= 50;
+  console.log(JSON.stringify({
+    number,
+    title: bot ? "Closed bot proof sample" : "Closed proof nudge sample",
+    html_url: "https://github.com/openclaw/openclaw/pull/" + number,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+    closed_at: "2026-01-03T00:00:00Z",
+    state: "closed",
+    locked: false,
+    active_lock_reason: null,
+    author_association: bot ? "NONE" : "CONTRIBUTOR",
+    user: { login: bot ? "app/clawsweeper" : "contributor" },
+    labels: ["triage: needs-real-behavior-proof"],
+    pull_request: {}
+  }));
+  process.exit(0);
+}
+const pullMatch = path.match(/\\/pulls\\/(\\d+)$/);
+if (pullMatch && handled.has(Number(pullMatch[1]))) {
+  console.log(JSON.stringify({ draft: false, head: { sha: null, repo: { full_name: null } } }));
+  process.exit(0);
+}
+console.error("unexpected gh args: " + args.join(" "));
+process.exit(1);
+`;
 }
 
 test("bot proof candidate scan prioritizes ClawSweeper proof blockers", () => {
@@ -322,53 +358,25 @@ test("proof nudge execute scans advance cursor to the last processed candidate",
       join(itemsDir, "42.md"),
       proofNudgeReport({ reviewedAt: "2026-01-02T00:00:00Z" }),
     );
-    withMockGh(
-      root,
-      `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const path = args[1] || "";
-const match = path.match(/\\/issues\\/(41|42)$/);
-if (match) {
-  console.log(JSON.stringify({
-    number: Number(match[1]),
-    title: "Closed proof nudge sample",
-    html_url: "https://github.com/openclaw/openclaw/pull/" + match[1],
-    created_at: "2026-01-01T00:00:00Z",
-    updated_at: "2026-01-02T00:00:00Z",
-    closed_at: "2026-01-03T00:00:00Z",
-    state: "closed",
-    locked: false,
-    active_lock_reason: null,
-    author_association: "CONTRIBUTOR",
-    user: { login: "contributor" },
-    labels: ["triage: needs-real-behavior-proof"],
-    pull_request: {}
-  }));
-  process.exit(0);
-}
-console.error("unexpected gh args: " + args.join(" "));
-process.exit(1);
-`,
-      () => {
-        execFileSync(process.execPath, [
-          "dist/clawsweeper.js",
-          "proof-nudges",
-          "--target-repo",
-          "openclaw/openclaw",
-          "--items-dir",
-          itemsDir,
-          "--limit",
-          "10",
-          "--processed-limit",
-          "2",
-          "--report-path",
-          reportPath,
-          "--cursor-path",
-          cursorPath,
-          "--execute",
-        ]);
-      },
-    );
+    withMockGh(root, closedProofLaneGhMockScript([41, 42]), () => {
+      execFileSync(process.execPath, [
+        "dist/clawsweeper.js",
+        "proof-nudges",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--items-dir",
+        itemsDir,
+        "--limit",
+        "10",
+        "--processed-limit",
+        "2",
+        "--report-path",
+        reportPath,
+        "--cursor-path",
+        cursorPath,
+        "--execute",
+      ]);
+    });
 
     const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
     assert.equal(cursor.repository, "openclaw/openclaw");
@@ -376,6 +384,134 @@ process.exit(1);
     assert.equal(cursor.next_cursor_number, 42);
     assert.equal(cursor.next_cursor_likely, true);
     assert.equal(cursor.reviewed_at, "2026-01-02T00:00:00Z");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bot proof execute scans advance cursor to the last processed candidate", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const reportPath = join(root, "bot-proof-report.json");
+    const cursorPath = join(root, "results", "bot-proof-cursors", "openclaw-openclaw.json");
+    mkdirSync(itemsDir, { recursive: true });
+    writeFileSync(
+      join(itemsDir, "51.md"),
+      proofNudgeReport({
+        author: "app/clawsweeper",
+        authorAssociation: "NONE",
+        reviewedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    writeFileSync(
+      join(itemsDir, "52.md"),
+      proofNudgeReport({
+        author: "app/clawsweeper",
+        authorAssociation: "NONE",
+        reviewedAt: "2026-01-02T00:00:00Z",
+      }),
+    );
+    withMockGh(root, closedProofLaneGhMockScript([51, 52]), () => {
+      execFileSync(process.execPath, [
+        "dist/clawsweeper.js",
+        "bot-proof",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--items-dir",
+        itemsDir,
+        "--limit",
+        "10",
+        "--processed-limit",
+        "2",
+        "--report-path",
+        reportPath,
+        "--cursor-path",
+        cursorPath,
+        "--execute",
+      ]);
+    });
+
+    const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
+    assert.equal(cursor.repository, "openclaw/openclaw");
+    assert.equal(cursor.lane, "bot_proof");
+    assert.equal(cursor.next_cursor_number, 52);
+    assert.equal(cursor.next_cursor_likely, true);
+    assert.equal(cursor.reviewed_at, "2026-01-02T00:00:00Z");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("targeted proof lane execute scans ignore cursor paths", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const proofItemsDir = join(root, "proof-items");
+    const botItemsDir = join(root, "bot-items");
+    const proofReportPath = join(root, "proof-nudge-report.json");
+    const botReportPath = join(root, "bot-proof-report.json");
+    const proofCursorPath = join(root, "results", "proof-nudge-cursors", "openclaw-openclaw.json");
+    const botCursorPath = join(root, "results", "bot-proof-cursors", "openclaw-openclaw.json");
+    mkdirSync(proofItemsDir, { recursive: true });
+    mkdirSync(botItemsDir, { recursive: true });
+    writeFileSync(join(proofItemsDir, "42.md"), proofNudgeReport());
+    writeFileSync(
+      join(botItemsDir, "52.md"),
+      proofNudgeReport({ author: "app/clawsweeper", authorAssociation: "NONE" }),
+    );
+    withMockGh(root, closedProofLaneGhMockScript([42, 52]), () => {
+      execFileSync(process.execPath, [
+        "dist/clawsweeper.js",
+        "proof-nudges",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--items-dir",
+        proofItemsDir,
+        "--item-numbers",
+        "42",
+        "--limit",
+        "10",
+        "--processed-limit",
+        "10",
+        "--report-path",
+        proofReportPath,
+        "--cursor-path",
+        proofCursorPath,
+        "--execute",
+      ]);
+      execFileSync(process.execPath, [
+        "dist/clawsweeper.js",
+        "bot-proof",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--items-dir",
+        botItemsDir,
+        "--item-numbers",
+        "52",
+        "--limit",
+        "10",
+        "--processed-limit",
+        "10",
+        "--report-path",
+        botReportPath,
+        "--cursor-path",
+        botCursorPath,
+        "--execute",
+      ]);
+    });
+
+    const proofReport = JSON.parse(readFileSync(proofReportPath, "utf8"));
+    const botReport = JSON.parse(readFileSync(botReportPath, "utf8"));
+    assert.deepEqual(
+      proofReport.map((entry: { number: number; action: string }) => [entry.number, entry.action]),
+      [[42, "skipped_not_open"]],
+    );
+    assert.deepEqual(
+      botReport.map((entry: { number: number; action: string }) => [entry.number, entry.action]),
+      [[52, "skipped_not_open"]],
+    );
+    assert.equal(existsSync(proofCursorPath), false);
+    assert.equal(existsSync(botCursorPath), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
