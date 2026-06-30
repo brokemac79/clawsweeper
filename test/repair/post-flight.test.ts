@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { mockGhBinEnv } from "../helpers.ts";
+
 const repoRoot = process.cwd();
 
 test("issue implementation post-flight waits for green PR checks without merging", () => {
@@ -411,8 +413,7 @@ test("post-flight keeps no-timestamp pending duplicate checks visible", () => {
 
 function fakeGhEnv(fakeBin: string): NodeJS.ProcessEnv {
   return {
-    GH_BIN: process.execPath,
-    GH_BIN_ARGS: JSON.stringify([path.join(fakeBin, "gh")]),
+    ...mockGhBinEnv(path.join(fakeBin, "gh")),
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

@@ -19,6 +19,7 @@ import {
   prepareManagedLocalReviewCheckoutForTest,
 } from "../dist/clawsweeper.js";
 import { runText, UserFacingCommandError } from "../dist/command.js";
+import { mockGhBinEnv } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../dist/clawsweeper.js", import.meta.url));
 
@@ -219,8 +220,7 @@ process.exit(1);
         encoding: "utf8",
         env: {
           ...process.env,
-          GH_BIN: process.execPath,
-          GH_BIN_ARGS: JSON.stringify([ghPath]),
+          ...mockGhBinEnv(ghPath),
           PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
         },
       },
@@ -351,8 +351,7 @@ process.stdin.on("end", () => process.exit(1));
         env: {
           ...process.env,
           CODEX_BIN: codexPath,
-          GH_BIN: process.execPath,
-          GH_BIN_ARGS: JSON.stringify([ghPath]),
+          ...mockGhBinEnv(ghPath),
           PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
         },
       },

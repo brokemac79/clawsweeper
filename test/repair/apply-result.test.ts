@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { mockGhBinEnv } from "../helpers.ts";
+
 const repoRoot = process.cwd();
 
 test("repair apply blocks PR duplicate close when coverage proof keeps the source open", () => {
@@ -1238,8 +1240,7 @@ function runApplyResult(
       CLAWSWEEPER_MODEL: "model-test",
       CLAWSWEEPER_PR_CLOSE_COVERAGE_PROOF_TIMEOUT_MS: "10000",
       GH_TOKEN: "write-token",
-      GH_BIN: process.execPath,
-      GH_BIN_ARGS: JSON.stringify([path.join(paths.binDir, "gh.js")]),
+      ...mockGhBinEnv(path.join(paths.binDir, "gh.js")),
       PATH: `${paths.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       PR_CLOSE_COVERAGE_PROOF_DECISION: options.proofDecision,
       PR_CLOSE_COVERAGE_PROOF_EXPECT_PROMPT: options.expectedPromptIncludes ?? "",

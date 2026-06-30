@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { mockGhBinEnv } from "../helpers.ts";
+
 test("plan-cluster carries worker target checkout into artifacts", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-plan-cluster-"));
   const jobPath = path.join(tmp, "job.md");
@@ -447,8 +449,7 @@ test("plan-cluster bounded PR hydration follows multiple GitHub pages", () => {
 
 function fakeGhEnv(binDir: string): NodeJS.ProcessEnv {
   return {
-    GH_BIN: process.execPath,
-    GH_BIN_ARGS: JSON.stringify([path.join(binDir, "gh")]),
+    ...mockGhBinEnv(path.join(binDir, "gh")),
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

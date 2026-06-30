@@ -5,6 +5,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 
+import { mockGhBinEnv } from "../helpers.ts";
+
 const scriptPath = path.resolve("dist/repair/pr-repair-intake.js");
 
 test("pr repair intake ignores cancelled-only checks", () => {
@@ -149,8 +151,7 @@ function runIntake(root: string, extraArgs: string[]): string {
 function fakeGhEnv(root: string): NodeJS.ProcessEnv {
   const bin = path.join(root, "bin");
   return {
-    GH_BIN: process.execPath,
-    GH_BIN_ARGS: JSON.stringify([path.join(bin, "gh")]),
+    ...mockGhBinEnv(path.join(bin, "gh")),
     PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

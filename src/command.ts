@@ -31,13 +31,14 @@ export function runText(
     trim = "end",
   }: RunTextOptions = {},
 ): string {
-  const resolved = resolveCommand(command, args);
+  const childEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...env };
+  const resolved = resolveCommand(command, args, childEnv);
   let text: string;
   try {
     text = execFileSync(resolved.command, resolved.args, {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...env },
+      env: childEnv,
       maxBuffer,
       stdio,
     });
@@ -63,22 +64,28 @@ function explainSpawnFailure(error: unknown, command: string, cwd?: string): unk
   return error;
 }
 
-function resolveCommand(command: string, args: string[]): { command: string; args: string[] } {
-  if (command === "gh" && process.env.GH_BIN) {
+export function resolveCommand(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { command: string; args: string[] } {
+  const key = commandBinKey(command);
+  const configured = env[`${key}_BIN`]?.trim();
+  if (configured) {
     return {
-      command: process.env.GH_BIN,
-      args: [...envArgs("GH_BIN_ARGS"), ...args],
+      command: configured,
+      args: [...envArgs(`${key}_BIN_ARGS`, env), ...args],
     };
   }
-  return { command: resolveExecutable(command), args };
+  return { command, args: [...args] };
 }
 
-function resolveExecutable(command: string): string {
-  return command === "git" ? (process.env.GIT_BIN ?? "git") : command;
+function commandBinKey(command: string): string {
+  return command.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
 }
 
-function envArgs(name: string): string[] {
-  const value = process.env[name];
+export function envArgs(name: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const value = env[name];
   if (!value) return [];
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {

@@ -5,6 +5,7 @@ import { stripAnsi } from "./comment-router-utils.js";
 import { ghCliEnv } from "./process-env.js";
 import { repoRoot } from "./paths.js";
 import { ghRetryKind, ghRetryWaitMs } from "../github-retry.js";
+import { resolveCommand } from "../command.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -276,18 +277,7 @@ function ghCommand(
   ghArgs: readonly string[],
   env: NodeJS.ProcessEnv,
 ): { command: string; args: string[] } {
-  const command = env.GH_BIN?.trim() || "gh";
-  return { command, args: [...envArgs("GH_BIN_ARGS", env), ...ghArgs] };
-}
-
-function envArgs(name: string, env: NodeJS.ProcessEnv): string[] {
-  const value = env[name];
-  if (!value) return [];
-  const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-    throw new Error(`${name} must be a JSON string array`);
-  }
-  return parsed;
+  return resolveCommand("gh", ghArgs, env);
 }
 
 function githubPathWithQueryDefaults(

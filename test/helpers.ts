@@ -787,3 +787,15 @@ export function withMockGh(root: string, script: string, run: () => void): void 
     else process.env.GH_BIN_ARGS = originalGhBinArgs;
   }
 }
+
+export function mockCommandBinEnv(command: string, commandPath: string): NodeJS.ProcessEnv {
+  const key = command.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+  return {
+    [`${key}_BIN`]: process.execPath,
+    [`${key}_BIN_ARGS`]: JSON.stringify([commandPath]),
+  };
+}
+
+export function mockGhBinEnv(ghPath: string): NodeJS.ProcessEnv {
+  return mockCommandBinEnv("gh", ghPath);
+}
