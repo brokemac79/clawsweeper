@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 
 export type RunTextOptions = {
   cwd?: string | undefined;
@@ -8,6 +9,23 @@ export type RunTextOptions = {
   stdio?: ["ignore", "pipe", "pipe"] | ["ignore", "pipe", "ignore"];
   trim?: "both" | "end" | "none";
 };
+
+export interface CommandInvocation {
+  command: string;
+  args: string[];
+  windowsVerbatimArguments?: boolean;
+}
+
+export type ResolveSpawnCommandOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  missingCommandMessage?: string;
+  platform?: NodeJS.Platform;
+};
+
+const windowsExecutablePattern = /\.(?:com|exe)$/i;
+const windowsBatchLauncherPattern = /\.(?:bat|cmd)$/i;
+const windowsMetaCharacterPattern = /([()\][%!^"`<>&|;, *?])/g;
 
 export class UserFacingCommandError extends Error {
   constructor(message: string) {
@@ -68,7 +86,7 @@ export function resolveCommand(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
-): { command: string; args: string[] } {
+): CommandInvocation {
   const key = commandBinKey(command);
   const configured = env[`${key}_BIN`]?.trim();
   if (configured) {
@@ -78,6 +96,45 @@ export function resolveCommand(
     };
   }
   return { command, args: [...args] };
+}
+
+export function resolveSpawnCommand(
+  command: string,
+  args: readonly string[],
+  {
+    cwd = process.cwd(),
+    env = process.env,
+    missingCommandMessage,
+    platform = process.platform,
+  }: ResolveSpawnCommandOptions = {},
+): CommandInvocation {
+  const resolved = resolveCommand(command, args, env);
+  if (platform !== "win32") return resolved;
+
+  const windowsCommand = resolveWindowsCommand(resolved.command, env, cwd);
+  if (!windowsCommand) {
+    if (missingCommandMessage) throw new Error(missingCommandMessage);
+    return resolved;
+  }
+  if (nodeShebangScript(windowsCommand)) {
+    return { command: process.execPath, args: [windowsCommand, ...resolved.args] };
+  }
+  if (windowsExecutablePattern.test(windowsCommand)) {
+    return { command: windowsCommand, args: resolved.args };
+  }
+  if (!windowsBatchLauncherPattern.test(windowsCommand)) {
+    return { command: windowsCommand, args: resolved.args };
+  }
+
+  const shellCommand = [
+    escapeWindowsCommand(normalize(windowsCommand)),
+    ...resolved.args.map((arg) => escapeWindowsArgument(arg, true)),
+  ].join(" ");
+  return {
+    command: windowsSystemExecutable("cmd.exe", env),
+    args: ["/d", "/s", "/c", `"${shellCommand}"`],
+    windowsVerbatimArguments: true,
+  };
 }
 
 function commandBinKey(command: string): string {
@@ -92,4 +149,102 @@ export function envArgs(name: string, env: NodeJS.ProcessEnv = process.env): str
     throw new Error(`${name} must be a JSON string array`);
   }
   return parsed;
+}
+
+function resolveWindowsCommand(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): string | undefined {
+  if (isAbsolute(command) || /[\\/]/.test(command)) return resolve(cwd, command);
+  const extensions = (windowsEnvironmentValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .filter(Boolean);
+  const candidates = extensions.includes("")
+    ? [command]
+    : [command, ...extensions.map((extension) => `${command}${extension}`)];
+  for (const directory of (windowsEnvironmentValue(env, "PATH") || "")
+    .split(delimiter)
+    .filter(Boolean)) {
+    for (const candidate of candidates) {
+      const parent = resolve(cwd, directory);
+      const filePath = resolve(parent, candidate);
+      if (existsSync(filePath)) return actualCasePath(parent, candidate) ?? filePath;
+    }
+  }
+  return undefined;
+}
+
+function actualCasePath(parent: string, candidate: string): string | undefined {
+  try {
+    const lowerCandidate = candidate.toLowerCase();
+    const entry = readdirSync(parent).find((name) => name.toLowerCase() === lowerCandidate);
+    return entry ? resolve(parent, entry) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function windowsSystemExecutable(name: string, env: NodeJS.ProcessEnv): string {
+  const systemRoot =
+    windowsEnvironmentValue(env, "SystemRoot") || windowsEnvironmentValue(env, "windir");
+  if (systemRoot) return join(systemRoot, "System32", name);
+  const comSpec = windowsEnvironmentValue(env, "ComSpec");
+  if (comSpec && isAbsolute(comSpec)) return join(dirname(comSpec), name);
+  throw new Error(`Unable to resolve Windows system executable: ${name}`);
+}
+
+export function windowsEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const entry = Object.entries(env).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1]?.trim() || undefined;
+}
+
+function nodeShebangScript(filePath: string): boolean {
+  if (windowsExecutablePattern.test(filePath) || windowsBatchLauncherPattern.test(filePath)) {
+    return false;
+  }
+  try {
+    const firstLine = readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] ?? "";
+    return /^#!.*\bnode\b/i.test(firstLine);
+  } catch {
+    return false;
+  }
+}
+
+function escapeWindowsCommand(value: string): string {
+  return value.replace(windowsMetaCharacterPattern, "^$1");
+}
+
+function escapeWindowsArgument(value: string, doubleEscapeMetaCharacters: boolean): string {
+  let escaped = quoteWindowsArgument(value);
+  escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
+  if (doubleEscapeMetaCharacters) {
+    escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
+  }
+  return escaped;
+}
+
+function quoteWindowsArgument(value: string): string {
+  let escaped = '"';
+  let backslashes = 0;
+
+  for (const char of value) {
+    if (char === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (char === '"') {
+      escaped += "\\".repeat(backslashes * 2 + 1);
+      escaped += char;
+      backslashes = 0;
+      continue;
+    }
+    escaped += "\\".repeat(backslashes);
+    escaped += char;
+    backslashes = 0;
+  }
+
+  escaped += "\\".repeat(backslashes * 2);
+  escaped += '"';
+  return escaped;
 }

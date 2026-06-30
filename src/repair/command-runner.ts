@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { resolveCommand } from "../command.js";
+import { resolveSpawnCommand } from "../command.js";
 
 const DEFAULT_COMMAND_MAX_BUFFER = 64 * 1024 * 1024;
 
@@ -17,7 +17,10 @@ export function runCommand(
   options: CommandRunOptions = {},
 ): string {
   const env = options.env ?? process.env;
-  const invocation = resolveCommand(command, commandArgs, env);
+  const invocation = resolveSpawnCommand(command, commandArgs, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    env,
+  });
   const child = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd,
     env,
@@ -26,6 +29,7 @@ export function runCommand(
     maxBuffer: options.maxBuffer ?? DEFAULT_COMMAND_MAX_BUFFER,
     timeout: options.timeoutMs,
     windowsHide: true,
+    ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
   const detail = [child.stderr, child.stdout].filter(Boolean).join("\n").trim();
   if (child.error) {
