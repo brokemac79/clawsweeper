@@ -169,7 +169,8 @@ function resolveWindowsCommand(
     for (const candidate of candidates) {
       const parent = resolve(cwd, directory);
       const filePath = resolve(parent, candidate);
-      if (existsSync(filePath)) return actualCasePath(parent, candidate) ?? filePath;
+      const actualPath = actualCasePath(parent, candidate);
+      if (actualPath || existsSync(filePath)) return actualPath ?? filePath;
     }
   }
   return undefined;
