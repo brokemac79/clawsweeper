@@ -1308,7 +1308,7 @@ function fetchPrCloseCoverageProofCommentWindowWithoutCount(
   }
   if (lastPage <= 1) {
     return {
-      comments: selectPrCloseCoverageProofCommentWindow(first.comments, boundedLimit),
+      comments: first.comments,
       total: first.comments.length,
     };
   }
@@ -1331,17 +1331,6 @@ function fetchPrCloseCoverageProofCommentWindowWithoutCount(
     tailSource = [...previous, ...last];
   }
   return { comments: [...head, ...tailSource.slice(-keepEnd)], total };
-}
-
-function selectPrCloseCoverageProofCommentWindow(
-  comments: JsonValue[],
-  limit: number,
-): JsonValue[] {
-  const boundedLimit = Math.max(0, Math.floor(limit));
-  if (comments.length <= boundedLimit) return comments;
-  const keepStart = Math.floor(boundedLimit / 2);
-  const keepEnd = Math.max(0, boundedLimit - keepStart);
-  return [...comments.slice(0, keepStart), ...comments.slice(-keepEnd)];
 }
 
 function fetchLastPrCloseCoverageProofComments(

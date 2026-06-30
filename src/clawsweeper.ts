@@ -15577,7 +15577,7 @@ function reviewCommentFromMutationResponse(
   if (!response.trim()) return undefined;
   try {
     const comment = asRecord(parseGhJson<unknown>(response, args));
-    if (commentId(comment) !== null || commentUrl(comment) || typeof comment.body === "string") {
+    if (commentId(comment) !== null || commentUrl(comment)) {
       return comment;
     }
   } catch {
