@@ -8,8 +8,23 @@ import {
   selectDueCandidateNumbersForTest,
   shouldReviewItem,
   shouldStopSaturatedPlanScan,
-} from "../dist/clawsweeper.js";
-import { item } from "./helpers.ts";
+} from "../dist/scheduler-policy.js";
+
+function item(overrides = {}) {
+  return {
+    repo: "openclaw/openclaw",
+    number: 123,
+    kind: "issue",
+    title: "Sample item",
+    url: "https://github.com/openclaw/openclaw/issues/123",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    author: "contributor",
+    authorAssociation: "NONE",
+    labels: [],
+    ...overrides,
+  };
+}
 
 test("review policy changes force fresh complete reports back into planning", () => {
   const reviewedAt = new Date().toISOString();
