@@ -73,7 +73,7 @@ pnpm run proof-nudges -- --target-repo openclaw/openclaw --execute --limit 10
 Useful options:
 
 - `--limit`: maximum nudges to plan or post, default `10`.
-- `--processed-limit`: maximum records to inspect in one run.
+- `--processed-limit`: maximum records to inspect in one run, minimum `1`.
 - `--cursor-path`: optional JSON cursor path used to rotate untargeted candidate scans after execute runs.
 - `--min-age-days`: first-nudge age gate, default `5`.
 - `--cooldown-days`: same-head cooldown, default `7`.
@@ -93,7 +93,7 @@ Scheduled operation uses repository variables:
 - `CLAWSWEEPER_PROOF_NUDGES_EXECUTE=1`: allow the scheduled lane to post comments. Without this, scheduled runs remain dry-run only.
 - `CLAWSWEEPER_PROOF_NUDGES_TARGET_REPO`: optional target repo, default `openclaw/openclaw`.
 - `CLAWSWEEPER_PROOF_NUDGES_LIMIT`: optional scheduled batch size, default `10`.
-- `CLAWSWEEPER_PROOF_NUDGES_PROCESSED_LIMIT`: optional scheduled scan size before the cursor advances; the CLI default is `max(limit * 20, 50)`.
+- `CLAWSWEEPER_PROOF_NUDGES_PROCESSED_LIMIT`: optional positive scheduled scan size before the cursor advances; the CLI default is `max(limit * 20, 50)`.
 - `CLAWSWEEPER_PROOF_NUDGES_MIN_AGE_DAYS`: optional first-nudge age gate, default `5`.
 - `CLAWSWEEPER_PROOF_NUDGES_COOLDOWN_DAYS`: optional same-head cooldown, default `7`.
 - `CLAWSWEEPER_BOT_PROOF_SCHEDULED=1`: include the bot-owned proof lane in scheduled runs.

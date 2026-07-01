@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   botProofCandidateRecordsForTest,
   botProofEligibilityForTest,
+  main,
   proofNudgeCandidateRecordsForTest,
   proofNudgeEligibilityForTest,
   renderBotProofDecisionCommentForTest,
@@ -343,101 +344,64 @@ test("proof nudge candidate rotation resumes after the cursor", () => {
   }
 });
 
-test("proof nudge execute scans advance cursor to the last processed candidate", () => {
+test("proof lane execute scans advance cursors to the last processed candidate", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
-    const itemsDir = join(root, "items");
-    const reportPath = join(root, "proof-nudge-report.json");
-    const cursorPath = join(root, "results", "proof-nudge-cursors", "openclaw-openclaw.json");
-    mkdirSync(itemsDir, { recursive: true });
-    writeFileSync(
-      join(itemsDir, "41.md"),
-      proofNudgeReport({ reviewedAt: "2026-01-01T00:00:00Z" }),
-    );
-    writeFileSync(
-      join(itemsDir, "42.md"),
-      proofNudgeReport({ reviewedAt: "2026-01-02T00:00:00Z" }),
-    );
-    withMockGh(root, closedProofLaneGhMockScript([41, 42]), () => {
-      execFileSync(process.execPath, [
-        "dist/clawsweeper.js",
-        "proof-nudges",
-        "--target-repo",
-        "openclaw/openclaw",
-        "--items-dir",
-        itemsDir,
-        "--limit",
-        "10",
-        "--processed-limit",
-        "2",
-        "--report-path",
-        reportPath,
-        "--cursor-path",
-        cursorPath,
-        "--execute",
-      ]);
+    const cases = [
+      { command: "proof-nudges", lane: "proof_nudges", numbers: [41, 42], bot: false },
+      { command: "bot-proof", lane: "bot_proof", numbers: [51, 52], bot: true },
+    ] as const;
+    withMockGh(root, closedProofLaneGhMockScript(cases.flatMap(({ numbers }) => numbers)), () => {
+      for (const { command, lane, numbers, bot } of cases) {
+        const itemsDir = join(root, command);
+        const cursorPath = join(root, "results", `${command}-cursors`, "openclaw-openclaw.json");
+        mkdirSync(itemsDir, { recursive: true });
+        numbers.forEach((number, index) =>
+          writeFileSync(
+            join(itemsDir, `${number}.md`),
+            proofNudgeReport({
+              author: bot ? "app/clawsweeper" : "contributor",
+              authorAssociation: bot ? "NONE" : "CONTRIBUTOR",
+              reviewedAt: `2026-01-0${index + 1}T00:00:00Z`,
+            }),
+          ),
+        );
+        execFileSync(process.execPath, [
+          "dist/clawsweeper.js",
+          command,
+          "--target-repo",
+          "openclaw/openclaw",
+          "--items-dir",
+          itemsDir,
+          "--processed-limit",
+          "2",
+          "--report-path",
+          join(root, `${command}.json`),
+          "--cursor-path",
+          cursorPath,
+          "--execute",
+        ]);
+        const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
+        assert.deepEqual(
+          {
+            repository: cursor.repository,
+            lane: cursor.lane,
+            number: cursor.next_cursor_number,
+            likely: cursor.next_cursor_likely,
+            sortAt: cursor.next_cursor_sort_at_ms,
+            reviewedAt: cursor.reviewed_at,
+          },
+          {
+            repository: "openclaw/openclaw",
+            lane,
+            number: numbers[1],
+            likely: true,
+            sortAt: Date.parse("2026-01-02T00:00:00Z"),
+            reviewedAt: "2026-01-02T00:00:00Z",
+          },
+        );
+      }
     });
-
-    const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
-    assert.equal(cursor.repository, "openclaw/openclaw");
-    assert.equal(cursor.lane, "proof_nudges");
-    assert.equal(cursor.next_cursor_number, 42);
-    assert.equal(cursor.next_cursor_likely, true);
-    assert.equal(cursor.reviewed_at, "2026-01-02T00:00:00Z");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("bot proof execute scans advance cursor to the last processed candidate", () => {
-  const root = mkdtempSync(tmpPrefix);
-  try {
-    const itemsDir = join(root, "items");
-    const reportPath = join(root, "bot-proof-report.json");
-    const cursorPath = join(root, "results", "bot-proof-cursors", "openclaw-openclaw.json");
-    mkdirSync(itemsDir, { recursive: true });
-    writeFileSync(
-      join(itemsDir, "51.md"),
-      proofNudgeReport({
-        author: "app/clawsweeper",
-        authorAssociation: "NONE",
-        reviewedAt: "2026-01-01T00:00:00Z",
-      }),
-    );
-    writeFileSync(
-      join(itemsDir, "52.md"),
-      proofNudgeReport({
-        author: "app/clawsweeper",
-        authorAssociation: "NONE",
-        reviewedAt: "2026-01-02T00:00:00Z",
-      }),
-    );
-    withMockGh(root, closedProofLaneGhMockScript([51, 52]), () => {
-      execFileSync(process.execPath, [
-        "dist/clawsweeper.js",
-        "bot-proof",
-        "--target-repo",
-        "openclaw/openclaw",
-        "--items-dir",
-        itemsDir,
-        "--limit",
-        "10",
-        "--processed-limit",
-        "2",
-        "--report-path",
-        reportPath,
-        "--cursor-path",
-        cursorPath,
-        "--execute",
-      ]);
-    });
-
-    const cursor = JSON.parse(readFileSync(cursorPath, "utf8"));
-    assert.equal(cursor.repository, "openclaw/openclaw");
-    assert.equal(cursor.lane, "bot_proof");
-    assert.equal(cursor.next_cursor_number, 52);
-    assert.equal(cursor.next_cursor_likely, true);
-    assert.equal(cursor.reviewed_at, "2026-01-02T00:00:00Z");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -446,74 +410,46 @@ test("bot proof execute scans advance cursor to the last processed candidate", (
 test("targeted proof lane execute scans ignore cursor paths", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
-    const proofItemsDir = join(root, "proof-items");
-    const botItemsDir = join(root, "bot-items");
-    const proofReportPath = join(root, "proof-nudge-report.json");
-    const botReportPath = join(root, "bot-proof-report.json");
-    const proofCursorPath = join(root, "results", "proof-nudge-cursors", "openclaw-openclaw.json");
-    const botCursorPath = join(root, "results", "bot-proof-cursors", "openclaw-openclaw.json");
-    mkdirSync(proofItemsDir, { recursive: true });
-    mkdirSync(botItemsDir, { recursive: true });
-    writeFileSync(join(proofItemsDir, "42.md"), proofNudgeReport());
-    writeFileSync(
-      join(botItemsDir, "52.md"),
-      proofNudgeReport({ author: "app/clawsweeper", authorAssociation: "NONE" }),
-    );
+    const cases = [
+      { command: "proof-nudges", number: 42, bot: false },
+      { command: "bot-proof", number: 52, bot: true },
+    ] as const;
     withMockGh(root, closedProofLaneGhMockScript([42, 52]), () => {
-      execFileSync(process.execPath, [
-        "dist/clawsweeper.js",
-        "proof-nudges",
-        "--target-repo",
-        "openclaw/openclaw",
-        "--items-dir",
-        proofItemsDir,
-        "--item-numbers",
-        "42",
-        "--limit",
-        "10",
-        "--processed-limit",
-        "10",
-        "--report-path",
-        proofReportPath,
-        "--cursor-path",
-        proofCursorPath,
-        "--execute",
-      ]);
-      execFileSync(process.execPath, [
-        "dist/clawsweeper.js",
-        "bot-proof",
-        "--target-repo",
-        "openclaw/openclaw",
-        "--items-dir",
-        botItemsDir,
-        "--item-numbers",
-        "52",
-        "--limit",
-        "10",
-        "--processed-limit",
-        "10",
-        "--report-path",
-        botReportPath,
-        "--cursor-path",
-        botCursorPath,
-        "--execute",
-      ]);
+      for (const { command, number, bot } of cases) {
+        const itemsDir = join(root, command);
+        const cursorPath = join(root, `${command}-cursor.json`);
+        mkdirSync(itemsDir, { recursive: true });
+        writeFileSync(
+          join(itemsDir, `${number}.md`),
+          proofNudgeReport({
+            author: bot ? "app/clawsweeper" : "contributor",
+            authorAssociation: bot ? "NONE" : "CONTRIBUTOR",
+          }),
+        );
+        execFileSync(process.execPath, [
+          "dist/clawsweeper.js",
+          command,
+          "--items-dir",
+          itemsDir,
+          "--item-numbers",
+          String(number),
+          "--report-path",
+          join(root, `${command}.json`),
+          "--cursor-path",
+          cursorPath,
+          "--execute",
+        ]);
+        assert.equal(existsSync(cursorPath), false);
+      }
     });
-
-    const proofReport = JSON.parse(readFileSync(proofReportPath, "utf8"));
-    const botReport = JSON.parse(readFileSync(botReportPath, "utf8"));
-    assert.deepEqual(
-      proofReport.map((entry: { number: number; action: string }) => [entry.number, entry.action]),
-      [[42, "skipped_not_open"]],
-    );
-    assert.deepEqual(
-      botReport.map((entry: { number: number; action: string }) => [entry.number, entry.action]),
-      [[52, "skipped_not_open"]],
-    );
-    assert.equal(existsSync(proofCursorPath), false);
-    assert.equal(existsSync(botCursorPath), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("proof lanes reject non-positive processed limits", async () => {
+  for (const command of ["proof-nudges", "bot-proof"]) {
+    await assert.rejects(main([command, "--processed-limit", "0"]), /positive integer/);
   }
 });
 

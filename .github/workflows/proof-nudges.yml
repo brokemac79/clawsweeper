@@ -18,7 +18,7 @@ on:
         required: false
         default: "10"
       processed_limit:
-        description: "Maximum candidate records to inspect before advancing the cursor"
+        description: "Maximum candidate records to inspect before advancing the cursor (minimum 1)"
         required: false
         default: ""
       min_age_days:
@@ -134,8 +134,8 @@ jobs:
               exit 1
             fi
           done
-          if [ -n "$PROOF_NUDGES_PROCESSED_LIMIT" ] && [[ ! "$PROOF_NUDGES_PROCESSED_LIMIT" =~ ^[0-9]+$ ]]; then
-            echo "::error::PROOF_NUDGES_PROCESSED_LIMIT must be a non-negative integer"
+          if [ -n "$PROOF_NUDGES_PROCESSED_LIMIT" ] && [[ ! "$PROOF_NUDGES_PROCESSED_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::PROOF_NUDGES_PROCESSED_LIMIT must be a positive integer"
             exit 1
           fi
 

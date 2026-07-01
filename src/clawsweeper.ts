@@ -18430,6 +18430,14 @@ function proofLaneCursorPath(args: Args, requestedItemNumbers: readonly number[]
   return rawPath ? resolve(rawPath) : null;
 }
 
+function proofLaneProcessedLimit(args: Args, fallback: number): number {
+  const value = numberArg(args.processed_limit, fallback);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new UserFacingCommandError("--processed-limit must be a positive integer");
+  }
+  return value;
+}
+
 function readProofLaneCursor(path: string): ProofLaneCursor | null {
   if (!existsSync(path)) return null;
   try {
@@ -18477,18 +18485,18 @@ function writeProofLaneCursor(path: string, lane: string, candidate: ProofLaneCa
 function proofNudgeCandidateRecords(
   itemsDir: string,
   requestedItemNumbers: readonly number[],
-): (ProofLaneCandidate & { likelyProofNudge: boolean })[] {
+): ProofLaneCandidate[] {
   return proofLaneCandidateRecords(
     itemsDir,
     requestedItemNumbers,
     realBehaviorProofNeedsContributorNudge,
-  ).map((candidate) => ({ ...candidate, likelyProofNudge: candidate.likely }));
+  );
 }
 
 function botProofCandidateRecords(
   itemsDir: string,
   requestedItemNumbers: readonly number[],
-): (ProofLaneCandidate & { likelyBotProof: boolean })[] {
+): ProofLaneCandidate[] {
   return proofLaneCandidateRecords(itemsDir, requestedItemNumbers, (markdown) => {
     return (
       frontMatterValue(markdown, "review_status") === "complete" &&
@@ -18496,7 +18504,7 @@ function botProofCandidateRecords(
       isClawSweeperAppAuthor(frontMatterValue(markdown, "author")) &&
       realBehaviorProofBlocksBotOwnedMerge(markdown)
     );
-  }).map((candidate) => ({ ...candidate, likelyBotProof: candidate.likely }));
+  });
 }
 
 function proofNudgeLiveFetchFailureReason(error: unknown): string {
@@ -18535,7 +18543,7 @@ function proofNudgesCommand(args: Args): void {
   repoFromArgs(args);
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const limit = Math.max(0, numberArg(args.limit, DEFAULT_PROOF_NUDGE_LIMIT));
-  const processedLimit = Math.max(1, numberArg(args.processed_limit, Math.max(limit * 20, 50)));
+  const processedLimit = proofLaneProcessedLimit(args, Math.max(limit * 20, 50));
   const minAgeDays = Math.max(0, numberArg(args.min_age_days, DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS));
   const cooldownDays = Math.max(
     0,
@@ -18723,7 +18731,7 @@ function botProofCommand(args: Args): void {
   repoFromArgs(args);
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const limit = Math.max(0, numberArg(args.limit, DEFAULT_PROOF_NUDGE_LIMIT));
-  const processedLimit = Math.max(1, numberArg(args.processed_limit, Math.max(limit * 20, 50)));
+  const processedLimit = proofLaneProcessedLimit(args, Math.max(limit * 20, 50));
   const execute = boolArg(args.execute);
   const dryRun = !execute;
   const maxRuntimeMs = numberArg(args.max_runtime_ms, 0);
