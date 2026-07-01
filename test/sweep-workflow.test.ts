@@ -1,22 +1,10 @@
 import assert from "node:assert/strict";
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
 import { makeTreeReadOnlyForTest, restoreTreeModesForTest } from "../dist/clawsweeper.js";
-import { tmpPrefix } from "./helpers.ts";
-
-function readText(path: string): string {
-  return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
-}
+import { readText, tmpPrefix } from "./helpers.ts";
 
 test("sweep keeps optional media tooling out of review startup", () => {
   const workflow = readText(".github/workflows/sweep.yml");

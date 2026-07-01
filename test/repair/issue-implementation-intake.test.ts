@@ -19,6 +19,7 @@ import {
   REVIEW_VIABLE_ISSUE_TRIGGER_SOURCE,
   REVIEW_VISION_FIT_TRIGGER_SOURCE,
 } from "../../dist/repair/comment-router-core.js";
+import { readText } from "../helpers.ts";
 
 function report(overrides = {}) {
   const fields = {
@@ -48,10 +49,6 @@ function report(overrides = {}) {
     .map(([key, value]) => `${key}: ${value}`)
     .join("\n");
   return `---\n${frontmatter}\n---\n\n## Repair Work Prompt\n\nFix the reproduced existing-behavior bug and add a regression test.\n`;
-}
-
-function readText(filePath: string): string {
-  return readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
 }
 
 test("strict reproducible bug reports are eligible for implementation intake", () => {

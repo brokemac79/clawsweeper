@@ -42,15 +42,12 @@ import {
   item,
   reportFrontMatter,
   reportWithSyncedReviewComment,
+  readText,
   runApplyDecisionsForTest,
   tmpPrefix,
   withMockGh,
   workPlanCandidateReport,
 } from "./helpers.ts";
-
-function readText(path: string): string {
-  return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
-}
 
 test("apply-decisions archives live-closed skipped records without reopening close gates", () => {
   const root = mkdtempSync(tmpPrefix);

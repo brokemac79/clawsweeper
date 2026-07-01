@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 import { renderReviewCommentFromReport } from "../dist/clawsweeper.js";
 
 export const tmpPrefix = join(tmpdir(), "clawsweeper-test-");
+
+export function readText(filePath: string): string {
+  return readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+}
 
 export function item(overrides = {}) {
   return {
@@ -796,6 +800,9 @@ export function mockCommandBinEnv(command: string, commandPath: string): NodeJS.
   };
 }
 
-export function mockGhBinEnv(ghPath: string): NodeJS.ProcessEnv {
-  return mockCommandBinEnv("gh", ghPath);
+export function mockGhBinEnv(ghPath: string, binDir?: string): NodeJS.ProcessEnv {
+  return {
+    ...mockCommandBinEnv("gh", ghPath),
+    ...(binDir ? { PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` } : {}),
+  };
 }

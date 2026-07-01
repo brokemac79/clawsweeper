@@ -144,7 +144,7 @@ test("issue implementation post-flight waits for green PR checks without merging
         ...process.env,
         CLAWSWEEPER_ALLOW_EXECUTE: "1",
         CLAWSWEEPER_ALLOWED_OWNER: "openclaw",
-        ...fakeGhEnv(fakeBin),
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -231,7 +231,7 @@ test("issue implementation post-flight waits for checks to be created", () => {
         CLAWSWEEPER_POST_FLIGHT_WAIT_MS: "10000",
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        ...fakeGhEnv(fakeBin),
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -322,7 +322,7 @@ test("merge post-flight waits when only ignored checks exist", () => {
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_MERGED_FILE: mergeFlagPath,
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        ...fakeGhEnv(fakeBin),
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -398,7 +398,7 @@ test("post-flight keeps no-timestamp pending duplicate checks visible", () => {
         CLAWSWEEPER_POST_FLIGHT_WAIT_MS: "10000",
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        ...fakeGhEnv(fakeBin),
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -410,13 +410,6 @@ test("post-flight keeps no-timestamp pending duplicate checks visible", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
-
-function fakeGhEnv(fakeBin: string): NodeJS.ProcessEnv {
-  return {
-    ...mockGhBinEnv(path.join(fakeBin, "gh")),
-    PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
-  };
-}
 
 function writeIssueImplementationJob(jobPath: string) {
   fs.writeFileSync(

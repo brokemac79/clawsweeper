@@ -85,7 +85,7 @@ test("plan-cluster hydrates the repository default branch instead of hard-coding
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...fakeGhEnv(binDir),
+      ...mockGhBinEnv(path.join(binDir, "gh"), binDir),
       FAKE_DEFAULT_BRANCH: "master",
     },
     stdio: "pipe",
@@ -245,7 +245,7 @@ test("plan-cluster allows security repair for linked PRs with automation opt-in 
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...fakeGhEnv(binDir),
+      ...mockGhBinEnv(path.join(binDir, "gh"), binDir),
       CLAWSWEEPER_MAX_LINKED_REFS: "1",
     },
     stdio: "pipe",
@@ -302,7 +302,7 @@ test("plan-cluster treats same-repo PR branches as writable despite raw maintain
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...fakeGhEnv(binDir),
+      ...mockGhBinEnv(path.join(binDir, "gh"), binDir),
       FAKE_GH_MAINTAINER_CAN_MODIFY: "false",
     },
     stdio: "pipe",
@@ -358,7 +358,7 @@ test("plan-cluster bounds PR file and commit hydration", () => {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...fakeGhEnv(binDir),
+      ...mockGhBinEnv(path.join(binDir, "gh"), binDir),
       FAKE_GH_LARGE_PR: "1",
       CLAWSWEEPER_MAX_FILES_PER_PR: "eighty",
       CLAWSWEEPER_MAX_COMMITS_PER_PR: "many",
@@ -421,7 +421,7 @@ test("plan-cluster bounded PR hydration follows multiple GitHub pages", () => {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...fakeGhEnv(binDir),
+      ...mockGhBinEnv(path.join(binDir, "gh"), binDir),
       FAKE_GH_LARGE_PR: "1",
       FAKE_GH_LARGE_PR_COUNT: "150",
       FAKE_GH_LOG: ghLog,
@@ -446,13 +446,6 @@ test("plan-cluster bounded PR hydration follows multiple GitHub pages", () => {
   assert.equal((ghCalls.match(/pulls\/74134\/files\?per_page=100&page=/g) ?? []).length, 2);
   assert.equal((ghCalls.match(/pulls\/74134\/commits\?per_page=100&page=/g) ?? []).length, 2);
 });
-
-function fakeGhEnv(binDir: string): NodeJS.ProcessEnv {
-  return {
-    ...mockGhBinEnv(path.join(binDir, "gh")),
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-  };
-}
 
 function fakeGhScript() {
   return `#!/usr/bin/env node

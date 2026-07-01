@@ -128,7 +128,7 @@ export function resolveSpawnCommand(
 
   const shellCommand = [
     escapeWindowsCommand(normalize(windowsCommand)),
-    ...resolved.args.map((arg) => escapeWindowsArgument(arg, true)),
+    ...resolved.args.map(escapeWindowsArgument),
   ].join(" ");
   return {
     command: windowsSystemExecutable("cmd.exe", env),
@@ -160,9 +160,7 @@ function resolveWindowsCommand(
   const extensions = (windowsEnvironmentValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD")
     .split(";")
     .filter(Boolean);
-  const candidates = extensions.includes("")
-    ? [command]
-    : [command, ...extensions.map((extension) => `${command}${extension}`)];
+  const candidates = [command, ...extensions.map((extension) => `${command}${extension}`)];
   for (const directory of (windowsEnvironmentValue(env, "PATH") || "")
     .split(delimiter)
     .filter(Boolean)) {
@@ -216,13 +214,10 @@ function escapeWindowsCommand(value: string): string {
   return value.replace(windowsMetaCharacterPattern, "^$1");
 }
 
-function escapeWindowsArgument(value: string, doubleEscapeMetaCharacters: boolean): string {
+function escapeWindowsArgument(value: string): string {
   let escaped = quoteWindowsArgument(value);
   escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
-  if (doubleEscapeMetaCharacters) {
-    escaped = escaped.replace(windowsMetaCharacterPattern, "^$1");
-  }
-  return escaped;
+  return escaped.replace(windowsMetaCharacterPattern, "^$1");
 }
 
 function quoteWindowsArgument(value: string): string {

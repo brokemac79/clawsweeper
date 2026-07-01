@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-function readText(filePath: string): string {
-  return fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
-}
+import { readText } from "../helpers.ts";
 
 test("no-op automerge repair updates outcome and re-enters router before exit", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");

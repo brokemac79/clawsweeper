@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { resolveSpawnCommand } from "../../dist/command.js";
 import { runCommand } from "../../dist/repair/command-runner.js";
+import { mockCommandBinEnv } from "../helpers.ts";
 
 test("runCommand handles validation output larger than Node's sync spawn default", () => {
   const output = runCommand(process.execPath, [
@@ -47,8 +48,7 @@ test("runCommand honors shared command bin overrides", () => {
       runCommand("validate", args, {
         env: {
           ...process.env,
-          VALIDATE_BIN: process.execPath,
-          VALIDATE_BIN_ARGS: JSON.stringify([commandPath]),
+          ...mockCommandBinEnv("validate", commandPath),
         },
       }),
       JSON.stringify(args),

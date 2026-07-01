@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import path from "node:path";
 import test from "node:test";
+
+import { readText } from "../helpers.ts";
 
 const REPAIR_RUNTIME_PATHS = [
   "prompts/pr-close-coverage-proof.md",
@@ -21,10 +22,6 @@ const SPARSE_REPAIR_BUILD_WORKFLOWS = [
   ".github/workflows/spam-comment-intake.yml",
   ".github/workflows/spam-scanner.yml",
 ] as const;
-
-function readText(filePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), filePath), "utf8").replace(/\r\n/g, "\n");
-}
 
 test("sparse repair build workflows include runtime dependencies", () => {
   for (const workflowPath of SPARSE_REPAIR_BUILD_WORKFLOWS) {
