@@ -16973,6 +16973,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
   const applyReportEntriesForDir = (
     dir: string,
     location: "items" | "closed",
+    filterRequested = true,
   ): Array<
     ReportEntry & {
       location: "items" | "closed";
@@ -16984,7 +16985,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       .filter(
         (entry) =>
           entry.repo === targetRepo() &&
-          (requestedItemNumberSet.size === 0 || requestedItemNumberSet.has(entry.number)),
+          (!filterRequested ||
+            requestedItemNumberSet.size === 0 ||
+            requestedItemNumberSet.has(entry.number)),
       )
       .map((entry) => ({
         ...entry,
@@ -16998,9 +17001,8 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       left.number - right.number,
   );
   const files = fileEntries.map((entry) => entry.name);
-  const openFileEntryByNumber = new Map(
-    fileEntries.filter((entry) => entry.location === "items").map((entry) => [entry.number, entry]),
-  );
+  const allOpenFileEntries = applyReportEntriesForDir(itemsDir, "items", false);
+  const openFileEntryByNumber = new Map(allOpenFileEntries.map((entry) => [entry.number, entry]));
   const closedThisRun = new Set<string>();
   if (fileEntries.length === 0 && !existsSync(itemsDir)) {
     console.log("No items directory.");
@@ -17088,6 +17090,13 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         action !== "retry_pr_close_coverage_proof" &&
         !shouldProbeClosedState)
     ) {
+      if (
+        !storedHash &&
+        requestedItemNumberSet.has(number) &&
+        recordApplySkipped("kept_open", "review lacks an item snapshot hash")
+      ) {
+        break;
+      }
       continue;
     }
     let isCloseProposal = isApplyCloseCandidateReport(markdown);
@@ -17325,6 +17334,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               }) === null &&
               counterpartOpenClosingPullRequestReason === null &&
               counterpartSameAuthorReason === null;
+            if (result && !fileEntries.some((entry) => entry.number === counterpartNumber)) {
+              fileEntries.push(counterpartEntry);
+            }
           }
         }
       }

@@ -65,7 +65,6 @@ test("workflow utility CLI initializes close-selection constants before preselec
       "action_taken: skipped_invalid_decision",
       "close_reason: implemented_on_main",
       "item_created_at: 2024-01-01T00:00:00Z",
-      "item_snapshot_hash: reviewed-snapshot",
       "---",
       "",
     ].join("\n"),
@@ -278,7 +277,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -294,7 +292,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: stale_insufficient_info",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -310,7 +307,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: mostly_implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -326,7 +322,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: mostly_implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -342,7 +337,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: mostly_implemented_on_main",
       `item_created_at: ${new Date().toISOString()}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -358,7 +352,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: low_signal_unmergeable_pr",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -374,7 +367,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: proposed_close",
       "close_reason: low_signal_unmergeable_pr",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -390,7 +382,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: retry_pr_close_coverage_proof",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -406,7 +397,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: kept_open",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -422,7 +412,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_pr_close_coverage_proof",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -439,7 +428,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -456,7 +444,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `work_cluster_refs: ${JSON.stringify(["Superseded by https://github.com/openclaw/openclaw/pull/400"])}`,
       "---",
       "",
@@ -475,7 +462,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "close_reason: none",
       "pr_rating_overall: F",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -492,7 +478,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `work_cluster_refs: ${JSON.stringify(["Superseded by openclaw/openclaw#400"])}`,
       "---",
       "",
@@ -510,7 +495,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `work_cluster_refs: ${JSON.stringify(["Superseded by #400"])}`,
       "---",
       "",
@@ -529,7 +513,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "close_reason: none",
       "pr_rating_overall: F",
       `item_created_at: ${new Date().toISOString()}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -545,7 +528,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_same_author_pair",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -561,7 +543,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_open_closing_pr",
       "close_reason: implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -577,7 +558,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_invalid_decision",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -593,7 +573,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_maintainer_authored",
       "close_reason: duplicate_or_superseded",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -609,7 +588,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_invalid_decision",
       "close_reason: implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -625,7 +603,6 @@ test("workflow utilities select eligible proposed close records", () => {
       "action_taken: skipped_maintainer_authored",
       "close_reason: implemented_on_main",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "---",
       "",
     ].join("\n"),
@@ -645,55 +622,6 @@ test("workflow utilities select eligible proposed close records", () => {
   assert.deepEqual(selected, [5, 12, 15, 17, 18, 21, 22, 24, 25, 26, 27, 30, 31]);
 });
 
-test("workflow utilities skip proposed apply records without snapshots", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
-  const oldDate = "2024-01-01T00:00:00Z";
-  write(
-    path.join(root, "records/openclaw-openclaw/items/openclaw-openclaw-41.md"),
-    [
-      "---",
-      "repository: openclaw/openclaw",
-      "type: issue",
-      "decision: close",
-      "confidence: high",
-      "action_taken: proposed_close",
-      "close_reason: implemented_on_main",
-      `item_created_at: ${oldDate}`,
-      "---",
-      "",
-    ].join("\n"),
-  );
-  write(
-    path.join(root, "records/openclaw-openclaw/items/openclaw-openclaw-42.md"),
-    [
-      "---",
-      "repository: openclaw/openclaw",
-      "type: issue",
-      "decision: close",
-      "confidence: high",
-      "action_taken: proposed_close",
-      "close_reason: implemented_on_main",
-      `item_created_at: ${oldDate}`,
-      "item_snapshot_hash: reviewed-snapshot",
-      "---",
-      "",
-    ].join("\n"),
-  );
-
-  const selected = withCwd(root, () =>
-    proposedItemNumbers({
-      targetRepo: "openclaw/openclaw",
-      applyKind: "all",
-      applyCloseReasons: "all",
-      staleMinAgeDays: 60,
-      minAgeDays: 0,
-      minAgeMinutes: null,
-    }),
-  );
-
-  assert.deepEqual(selected, [42]);
-});
-
 test("workflow utilities allow ClawHub implemented-on-main issue proposals", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
   write(
@@ -707,7 +635,6 @@ test("workflow utilities allow ClawHub implemented-on-main issue proposals", () 
       "action_taken: proposed_close",
       "close_reason: implemented_on_main",
       "item_created_at: 2024-01-01T00:00:00Z",
-      "item_snapshot_hash: reviewed-snapshot",
       "---",
       "",
     ].join("\n"),
@@ -723,7 +650,6 @@ test("workflow utilities allow ClawHub implemented-on-main issue proposals", () 
       "action_taken: proposed_close",
       "close_reason: duplicate_or_superseded",
       "item_created_at: 2024-01-01T00:00:00Z",
-      "item_snapshot_hash: reviewed-snapshot",
       "---",
       "",
     ].join("\n"),
@@ -740,7 +666,6 @@ test("workflow utilities allow ClawHub implemented-on-main issue proposals", () 
       "action_taken: kept_open",
       "close_reason: none",
       "item_created_at: 2024-01-01T00:00:00Z",
-      "item_snapshot_hash: reviewed-snapshot",
       "---",
       "",
     ].join("\n"),
@@ -801,7 +726,6 @@ test("workflow utilities select proposed PR closes that can need coverage proof"
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `work_cluster_refs: ${JSON.stringify(["Superseded by #400"])}`,
       "---",
       "",
@@ -819,7 +743,6 @@ test("workflow utilities select proposed PR closes that can need coverage proof"
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `work_cluster_refs: ${JSON.stringify(["Superseded by [PR #400](https://github.com/other/repo/pull/400)"])}`,
       "---",
       "",
@@ -837,7 +760,6 @@ test("workflow utilities select proposed PR closes that can need coverage proof"
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       `merge_risk_options: ${JSON.stringify([
         {
           category: "pause_or_close",
@@ -862,7 +784,6 @@ test("workflow utilities select proposed PR closes that can need coverage proof"
       "action_taken: kept_open",
       "close_reason: none",
       `item_created_at: ${oldDate}`,
-      `item_snapshot_hash: reviewed-snapshot`,
       "pr_rating_overall: F",
       "---",
       "",
@@ -956,7 +877,6 @@ test("workflow utilities rotate bounded apply candidate batches by apply cursor"
   writeProposedRecord(root, 40, "issue", "proposed_close", "implemented_on_main", oldDate, {
     applyCheckedAt: "2026-01-03T00:00:00Z",
   });
-
   const options = {
     targetRepo: "openclaw/openclaw",
     applyKind: "all",
@@ -972,35 +892,17 @@ test("workflow utilities rotate bounded apply candidate batches by apply cursor"
     withCwd(root, () => proposedItemNumbers(options)),
     [20, 30],
   );
-
   write(
     cursorPath,
-    `${JSON.stringify(
-      {
-        target_repo: "openclaw/openclaw",
-        next_after_number: 30,
-        next_after_apply_checked_at: "2026-01-01T00:00:00Z",
-      },
-      null,
-      2,
-    )}\n`,
+    JSON.stringify({ next_after_number: 30, next_after_apply_checked_at: "2026-01-01T00:00:00Z" }),
   );
   assert.deepEqual(
     withCwd(root, () => proposedItemNumbers(options)),
     [10, 40],
   );
-
   write(
     cursorPath,
-    `${JSON.stringify(
-      {
-        target_repo: "openclaw/openclaw",
-        next_after_number: 40,
-        next_after_apply_checked_at: "2026-01-03T00:00:00Z",
-      },
-      null,
-      2,
-    )}\n`,
+    JSON.stringify({ next_after_number: 40, next_after_apply_checked_at: "2026-01-03T00:00:00Z" }),
   );
   assert.deepEqual(
     withCwd(root, () => proposedItemNumbers(options)),
@@ -1008,76 +910,35 @@ test("workflow utilities rotate bounded apply candidate batches by apply cursor"
   );
 });
 
-test("workflow utilities write apply cursor from the last processed report item", () => {
+test("workflow utilities persist apply cursor from processed or selected items", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
   const cursorPath = path.join(root, "results/apply-cursors/openclaw-openclaw.json");
-  const reportPath = path.join(root, ".artifacts/apply-reports/apply-report-1.json");
-  const oldDate = "2024-01-01T00:00:00Z";
-  writeProposedRecord(root, 10, "issue", "proposed_close", "implemented_on_main", oldDate, {
-    applyCheckedAt: "2026-01-01T00:00:00Z",
-  });
-  writeProposedRecord(root, 20, "issue", "proposed_close", "implemented_on_main", oldDate, {
-    applyCheckedAt: "2026-01-02T00:00:00Z",
-  });
-  write(
-    reportPath,
-    `${JSON.stringify(
-      [
-        { number: 10, action: "kept_open", reason: "first" },
-        { number: 20, action: "kept_open", reason: "second" },
-      ],
-      null,
-      2,
-    )}\n`,
-  );
-
-  assert.deepEqual(
-    withCwd(root, () => writeApplyCursor(cursorPath, reportPath, "openclaw/openclaw")),
-    {
-      processed_count: "2",
-      selected_count: "0",
-      next_cursor_number: "20",
-      next_cursor_apply_checked_at: "2026-01-02T00:00:00Z",
-    },
-  );
-  assert.deepEqual(JSON.parse(fs.readFileSync(cursorPath, "utf8")), {
-    target_repo: "openclaw/openclaw",
-    next_after_number: 20,
-    next_after_apply_checked_at: "2026-01-02T00:00:00Z",
-    processed_count: 2,
-    selected_count: 0,
-    updated_at: JSON.parse(fs.readFileSync(cursorPath, "utf8")).updated_at,
-  });
-});
-
-test("workflow utilities write apply cursor from selected items when report is empty", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
-  const cursorPath = path.join(root, "results/apply-cursors/openclaw-openclaw.json");
-  const reportPath = path.join(root, ".artifacts/apply-reports/apply-report-1.json");
+  const reportPath = path.join(root, "apply-report.json");
   const oldDate = "2024-01-01T00:00:00Z";
   writeProposedRecord(root, 10, "issue", "proposed_close", "implemented_on_main", oldDate);
   writeProposedRecord(root, 20, "issue", "proposed_close", "implemented_on_main", oldDate, {
     applyCheckedAt: "2026-01-02T00:00:00Z",
   });
-  write(reportPath, "[]\n");
 
-  assert.deepEqual(
-    withCwd(root, () => writeApplyCursor(cursorPath, reportPath, "openclaw/openclaw", "10,20")),
-    {
-      processed_count: "0",
-      selected_count: "2",
-      next_cursor_number: "20",
-      next_cursor_apply_checked_at: "2026-01-02T00:00:00Z",
-    },
-  );
-  assert.deepEqual(JSON.parse(fs.readFileSync(cursorPath, "utf8")), {
-    target_repo: "openclaw/openclaw",
-    next_after_number: 20,
-    next_after_apply_checked_at: "2026-01-02T00:00:00Z",
-    processed_count: 0,
-    selected_count: 2,
-    updated_at: JSON.parse(fs.readFileSync(cursorPath, "utf8")).updated_at,
-  });
+  for (const [report, selected] of [
+    [[{ number: 20, action: "kept_open" }], ""],
+    [
+      [
+        { number: 20, action: "kept_open" },
+        { number: 10, action: "closed" },
+      ],
+      "10,20",
+    ],
+    [[], "10,20"],
+  ]) {
+    write(reportPath, JSON.stringify(report));
+    withCwd(root, () => writeApplyCursor(cursorPath, reportPath, "openclaw/openclaw", selected));
+    const cursor = JSON.parse(fs.readFileSync(cursorPath, "utf8"));
+    assert.deepEqual(
+      [cursor.target_repo, cursor.next_after_number, cursor.next_after_apply_checked_at],
+      ["openclaw/openclaw", 20, "2026-01-02T00:00:00Z"],
+    );
+  }
 });
 
 test("workflow utilities select cursor-based PR comment sync batches", () => {
@@ -1181,7 +1042,6 @@ function writeProposedRecord(
     `action_taken: ${actionTaken}`,
     `close_reason: ${closeReason}`,
     `item_created_at: ${itemCreatedAt}`,
-    `item_snapshot_hash: reviewed-snapshot`,
   ];
   if (options.applyCheckedAt) lines.push(`apply_checked_at: ${options.applyCheckedAt}`);
   lines.push("---", "");

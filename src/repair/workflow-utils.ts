@@ -82,13 +82,11 @@ function runCli(): void {
       );
       break;
     case "write-apply-cursor":
-      printOutput(
-        writeApplyCursor(
-          requiredString("cursor-path"),
-          requiredString("report"),
-          requiredString("target-repo"),
-          optionalString("item-numbers"),
-        ),
+      writeApplyCursor(
+        requiredString("cursor-path"),
+        requiredString("report"),
+        requiredString("target-repo"),
+        optionalString("item-numbers"),
       );
       break;
     case "merge-apply-reports":
@@ -344,7 +342,6 @@ function selectedProposedItemCandidates(
       if (repoFor(markdown, name) !== options.targetRepo) return [];
       const type = frontMatterValue(markdown, "type");
       if (options.applyKind !== "all" && type && type !== options.applyKind) return [];
-      if (!frontMatterValue(markdown, "item_snapshot_hash")) return [];
       const decision = frontMatterValue(markdown, "decision");
       const action = frontMatterValue(markdown, "action_taken");
       const confidence = frontMatterValue(markdown, "confidence");
@@ -597,7 +594,7 @@ export function writeApplyCursor(
   reportPath: string,
   targetRepo: string,
   itemNumbers = "",
-): Record<string, string> {
+): void {
   const actions = readApplyActions(reportPath);
   const processed = actions.flatMap((action) =>
     typeof action.number === "number" ? [action.number] : [],
@@ -605,7 +602,12 @@ export function writeApplyCursor(
   const selected = csvItems(itemNumbers)
     .map((item) => Number(item))
     .filter((number) => Number.isInteger(number) && number > 0);
-  const number = processed.at(-1) ?? selected.at(-1) ?? 0;
+  const processedSet = new Set(processed);
+  const number =
+    selected.filter((itemNumber) => processedSet.has(itemNumber)).at(-1) ??
+    selected.at(-1) ??
+    processed.at(-1) ??
+    0;
   const applyCheckedAt = number > 0 ? applyCheckedAtForItem(targetRepo, number) : "";
   fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
   fs.writeFileSync(
@@ -615,20 +617,12 @@ export function writeApplyCursor(
         target_repo: targetRepo,
         next_after_number: number,
         next_after_apply_checked_at: applyCheckedAt,
-        processed_count: processed.length,
-        selected_count: selected.length,
         updated_at: new Date().toISOString(),
       },
       null,
       2,
     )}\n`,
   );
-  return {
-    processed_count: String(processed.length),
-    selected_count: String(selected.length),
-    next_cursor_number: String(number),
-    next_cursor_apply_checked_at: applyCheckedAt,
-  };
 }
 
 function applyCheckedAtForItem(targetRepo: string, itemNumber: number): string {
