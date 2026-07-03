@@ -41,6 +41,8 @@ type ApplyReportSummary = {
     closure: ApplyLaneSummary;
     comment_sync: ApplyLaneSummary;
   };
+  next_actions: ApplySkipNextAction[];
+  next_action_buckets: Record<string, number>;
   attention_reasons: string[];
   cursor_required: boolean;
   cursor: {
@@ -59,6 +61,26 @@ type ApplyLaneSummary = {
   skip_reasons: Record<string, number>;
 };
 
+type ApplySkipNextAction = {
+  reason: string;
+  count: number;
+  bucket:
+    | "review_refresh"
+    | "close_coverage_proof"
+    | "maintainer_review"
+    | "stable_skip"
+    | "report_quality_repair"
+    | "defer_until_closing_pr"
+    | "run_budget"
+    | "live_state_recovery"
+    | "already_resolved"
+    | "inspect";
+  owner: "clawsweeper" | "maintainer" | "github" | "none";
+  retryable: boolean;
+  label: string;
+  summary: string;
+  next_step: string;
+};
 const args = parseArgs(process.argv.slice(2));
 
 function runCli(): void {
@@ -333,6 +355,7 @@ export function summarizeApplyReport(options: ApplyReportSummaryOptions): ApplyR
       }
     }
   }
+  const nextActions = applySkipNextActions(skipReasons);
 
   const status =
     actions.length === 0 ? "idle" : attentionReasons.length > 0 ? "needs_attention" : "ok";
@@ -364,6 +387,8 @@ export function summarizeApplyReport(options: ApplyReportSummaryOptions): ApplyR
       Object.entries(skipReasons).sort(([left], [right]) => left.localeCompare(right)),
     ),
     lanes,
+    next_actions: nextActions,
+    next_action_buckets: applyNextActionBuckets(nextActions),
     attention_reasons: attentionReasons,
     cursor_required: options.cursorRequired,
     cursor,
@@ -435,6 +460,183 @@ function isProductiveApplyAction(entry: ApplyAction): boolean {
   );
 }
 
+function applySkipNextActions(skipReasons: Record<string, number>): ApplySkipNextAction[] {
+  return Object.entries(skipReasons)
+    .filter(([, count]) => Number.isFinite(count) && count > 0)
+    .map(([reason, count]) => applySkipNextAction(reason, count))
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        applyNextActionBucketRank(left.bucket) - applyNextActionBucketRank(right.bucket) ||
+        left.reason.localeCompare(right.reason),
+    );
+}
+
+function applyNextActionBuckets(actions: ApplySkipNextAction[]): Record<string, number> {
+  const buckets: Record<string, number> = {};
+  for (const action of actions) {
+    buckets[action.bucket] = (buckets[action.bucket] || 0) + action.count;
+  }
+  return Object.fromEntries(
+    Object.entries(buckets).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function applyNextActionBucketRank(bucket: ApplySkipNextAction["bucket"]): number {
+  return [
+    "live_state_recovery",
+    "run_budget",
+    "review_refresh",
+    "close_coverage_proof",
+    "report_quality_repair",
+    "defer_until_closing_pr",
+    "maintainer_review",
+    "stable_skip",
+    "already_resolved",
+    "inspect",
+  ].indexOf(bucket);
+}
+
+function applySkipNextAction(reason: string, count: number): ApplySkipNextAction {
+  if (reason === "skipped_changed_since_review") {
+    return {
+      reason,
+      count,
+      bucket: "review_refresh",
+      owner: "clawsweeper",
+      retryable: true,
+      label: "Refresh review",
+      summary: "The item changed after the review that proposed closing it.",
+      next_step: "Queue a fresh ClawSweeper review before any close retry.",
+    };
+  }
+  if (reason === "skipped_pr_close_coverage_proof") {
+    return {
+      reason,
+      count,
+      bucket: "close_coverage_proof",
+      owner: "clawsweeper",
+      retryable: true,
+      label: "Add close proof",
+      summary: "The PR close proposal needs coverage proof before it can be applied.",
+      next_step: "Run or refresh close-coverage proof for the canonical/covered PR pair.",
+    };
+  }
+  if (reason === "skipped_protected_label" || reason === "skipped_policy_exempt") {
+    return {
+      reason,
+      count,
+      bucket: "maintainer_review",
+      owner: "maintainer",
+      retryable: false,
+      label: "Maintainer decision",
+      summary: "A protected label or policy exemption blocks automated pruning.",
+      next_step: "Have a maintainer confirm the label/policy should remain or close manually.",
+    };
+  }
+  if (reason === "skipped_maintainer_authored") {
+    return {
+      reason,
+      count,
+      bucket: "maintainer_review",
+      owner: "maintainer",
+      retryable: false,
+      label: "Maintainer-authored",
+      summary: "Automation does not close maintainer-authored items without human judgement.",
+      next_step: "Route to maintainer review or close manually if the owner agrees.",
+    };
+  }
+  if (reason === "skipped_same_author_pair") {
+    return {
+      reason,
+      count,
+      bucket: "stable_skip",
+      owner: "none",
+      retryable: false,
+      label: "Stable skip",
+      summary:
+        "The source and canonical items have the same author, so automated duplicate close is intentionally conservative.",
+      next_step: "Leave as a stable skip unless maintainers change the same-author close policy.",
+    };
+  }
+  if (reason === "skipped_invalid_decision") {
+    return {
+      reason,
+      count,
+      bucket: "report_quality_repair",
+      owner: "clawsweeper",
+      retryable: true,
+      label: "Repair review report",
+      summary: "The durable review decision was incomplete or invalid for apply.",
+      next_step: "Queue report-quality repair or re-review so the close decision becomes valid.",
+    };
+  }
+  if (reason === "skipped_open_closing_pr") {
+    return {
+      reason,
+      count,
+      bucket: "defer_until_closing_pr",
+      owner: "github",
+      retryable: false,
+      label: "Wait for closing PR",
+      summary: "The item appears covered by a pull request that is still open.",
+      next_step: "Defer until the linked closing PR merges, closes, or changes state.",
+    };
+  }
+  if (reason === "skipped_runtime_budget") {
+    return {
+      reason,
+      count,
+      bucket: "run_budget",
+      owner: "clawsweeper",
+      retryable: true,
+      label: "Runtime budget",
+      summary: "The apply lane stopped because it reached its bounded runtime.",
+      next_step: "Let the next scheduled run continue; tune runtime or batch size if this repeats.",
+    };
+  }
+  if (reason === "skipped_live_fetch_failed") {
+    return {
+      reason,
+      count,
+      bucket: "live_state_recovery",
+      owner: "github",
+      retryable: true,
+      label: "Recover live check",
+      summary: "ClawSweeper could not confirm live GitHub state before mutating.",
+      next_step:
+        "Inspect auth, API, or rate-limit failures and retry only after live checks recover.",
+    };
+  }
+  if (
+    reason === "skipped_not_open" ||
+    reason === "skipped_already_closed" ||
+    reason === "skipped_closed"
+  ) {
+    return {
+      reason,
+      count,
+      bucket: "already_resolved",
+      owner: "none",
+      retryable: false,
+      label: "Already resolved",
+      summary: "The item was not open by the time apply checked it.",
+      next_step:
+        "No action is normally needed; investigate only if this bucket dominates repeated runs.",
+    };
+  }
+  return {
+    reason,
+    count,
+    bucket: "inspect",
+    owner: "maintainer",
+    retryable: false,
+    label: "Inspect skip",
+    summary: "Apply reported an unmapped skip bucket.",
+    next_step:
+      "Inspect the workflow run and add a deterministic next-action mapping if this repeats.",
+  };
+}
 function applyReportHealthSummary(options: {
   status: ApplyReportSummary["status"];
   processed: number;

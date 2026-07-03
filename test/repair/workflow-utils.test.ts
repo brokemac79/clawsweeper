@@ -290,6 +290,57 @@ test("workflow utilities summarize comment-sync apply reports separately from cl
   });
 });
 
+test("workflow utilities classify common apply skip reasons into next actions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
+  const reportPath = path.join(root, "apply-report.json");
+  write(
+    reportPath,
+    JSON.stringify([
+      { number: 10, action: "skipped_pr_close_coverage_proof" },
+      { number: 20, action: "skipped_protected_label" },
+      { number: 30, action: "skipped_same_author_pair" },
+      { number: 40, action: "skipped_invalid_decision" },
+      { number: 50, action: "skipped_open_closing_pr" },
+      { number: 60, action: "skipped_maintainer_authored" },
+    ]),
+  );
+
+  const summary = summarizeApplyReport({
+    reportPath,
+    targetRepo: "openclaw/openclaw",
+    mode: "close",
+    processedLimit: 300,
+    closeLimit: 5,
+    cursorPath: path.join(root, "missing-cursor.json"),
+    cursorRequired: false,
+  });
+
+  assert.deepEqual(summary.next_action_buckets, {
+    close_coverage_proof: 1,
+    defer_until_closing_pr: 1,
+    maintainer_review: 2,
+    report_quality_repair: 1,
+    stable_skip: 1,
+  });
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_pr_close_coverage_proof")
+      ?.next_step,
+    "Run or refresh close-coverage proof for the canonical/covered PR pair.",
+  );
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_open_closing_pr")?.bucket,
+    "defer_until_closing_pr",
+  );
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_same_author_pair")?.retryable,
+    false,
+  );
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_invalid_decision")?.owner,
+    "clawsweeper",
+  );
+});
+
 test("workflow utilities flag full-window close scans without the required cursor", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-workflow-"));
   const reportPath = path.join(root, "apply-report.json");
