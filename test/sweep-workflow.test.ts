@@ -139,7 +139,11 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
   assert.match(inputBlock, /apply_limit:[\s\S]*default: "5"/);
   assert.match(inputBlock, /apply_checkpoint_size:[\s\S]*default: "5"/);
   assert.match(applyStep, /Capping apply checkpoint size at 5/);
-  assert.match(applyStep, /close_processed_limit=300/);
+  assert.match(applyStep, /base_close_processed_limit=300/);
+  assert.match(applyStep, /max_close_processed_limit=900/);
+  assert.match(applyStep, /close_processed_limit="\$base_close_processed_limit"/);
+  assert.match(applyStep, /adaptive-apply-batch-size/);
+  assert.match(applyStep, /--status-path "results\/sweep-status\/\$\{target_slug\}\.json"/);
   assert.match(applyStep, /processed-limit "\$close_processed_limit"/);
   assert.match(applyStep, /comment_sync_processed_limit=1000/);
   assert.match(applyStep, /--processed-limit "\$comment_sync_processed_limit"/);
@@ -163,6 +167,14 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
   assert.match(applyStep, /--apply-health-file "\.artifacts\/apply-health-final\.json"/);
   assert.match(applyStep, /--state "Apply idle"/);
   assert.match(applyStep, /--batch-size "\$close_processed_limit"/);
+  assert.match(
+    applyStep,
+    /Scan window: \$close_processed_limit records \(\$adaptive_apply_scan_reason\)/,
+  );
+  assert.match(
+    applyStep,
+    /Auto-selected \$proposed_count proposed close candidate\(s\) from \$close_processed_limit-record apply cursor window/,
+  );
   assert.match(applyStep, /--cursor-path "\$apply_cursor_path"/);
   assert.match(applyStep, /write-apply-cursor/);
   assert.match(applyStep, /--item-numbers "\$item_numbers"/);

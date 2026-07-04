@@ -2263,7 +2263,10 @@ jobs:
           progress_every="10"
           checkpoint_size="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apply_checkpoint_size || '5' }}"
           comment_sync_processed_limit=1000
-          close_processed_limit=300
+          base_close_processed_limit=300
+          max_close_processed_limit=900
+          close_processed_limit="$base_close_processed_limit"
+          adaptive_apply_scan_reason="base_window"
           sync_batch_size="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apply_limit || '25' }}"
           item_numbers="${{ github.event_name == 'repository_dispatch' && github.event.client_payload.item_number || github.event.inputs.apply_item_numbers || '' }}"
           sync_open_pr_batch="${{ github.event_name == 'schedule' && github.event.schedule == '6,21,36,51 * * * *' && 'true' || 'false' }}"
@@ -2310,6 +2313,17 @@ jobs:
           if [ "$checkpoint_size" -gt 5 ]; then
             echo "Capping apply checkpoint size at 5 to keep each GitHub App token within its lifetime."
             checkpoint_size=5
+          fi
+          if [ "$sync_comments_only" != "true" ] && [ -z "$item_numbers" ]; then
+            mkdir -p .artifacts
+            adaptive_batch_env=".artifacts/apply-adaptive-batch.env"
+            pnpm run --silent workflow -- adaptive-apply-batch-size \
+              --status-path "results/sweep-status/${target_slug}.json" \
+              --base-size "$base_close_processed_limit" \
+              --max-size "$max_close_processed_limit" > "$adaptive_batch_env"
+            cat "$adaptive_batch_env"
+            close_processed_limit="$(awk -F= '$1 == "close_processed_limit" { print $2 }' "$adaptive_batch_env")"
+            adaptive_apply_scan_reason="$(awk -F= '$1 == "adaptive_apply_scan_reason" { print $2 }' "$adaptive_batch_env")"
           fi
           mkdir -p .artifacts/apply-reports
           publish_changes() {
@@ -2430,7 +2444,7 @@ jobs:
               if [ "$proposed_count" -lt "$limit" ]; then
                 limit="$proposed_count"
               fi
-              echo "Auto-selected $proposed_count proposed close candidate(s) from apply cursor window: $item_numbers; apply-ready count: ${apply_ready_count:-unknown}"
+              echo "Auto-selected $proposed_count proposed close candidate(s) from $close_processed_limit-record apply cursor window ($adaptive_apply_scan_reason): $item_numbers; apply-ready count: ${apply_ready_count:-unknown}"
             fi
           fi
           item_numbers_arg=()
@@ -2466,7 +2480,7 @@ jobs:
           pnpm run status -- \
             --target-repo "$TARGET_REPO" \
             --state "Apply in progress" \
-            --detail "Starting apply/comment-sync run for up to $limit fresh $apply_kind closes. Close reasons: $apply_close_reasons. Existing Codex automated review comments are updated in place when closing or when comment-only sync is stale by ${comment_sync_min_age_days} day(s); checkpoints commit every $checkpoint_size fresh closes; close delay is ${close_delay_ms}ms; sync-comments-only=$sync_comments_only; item numbers=${item_numbers:-all}." \
+            --detail "Starting apply/comment-sync run for up to $limit fresh $apply_kind closes. Close reasons: $apply_close_reasons. Scan window: $close_processed_limit records ($adaptive_apply_scan_reason). Existing Codex automated review comments are updated in place when closing or when comment-only sync is stale by ${comment_sync_min_age_days} day(s); checkpoints commit every $checkpoint_size fresh closes; close delay is ${close_delay_ms}ms; sync-comments-only=$sync_comments_only; item numbers=${item_numbers:-all}." \
             --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if ! publish_changes "chore: mark sweep apply in progress" records results/sweep-status; then
             echo "Best-effort apply start status update failed"
@@ -2659,6 +2673,8 @@ jobs:
             echo "APPLY_SYNC_OPEN_PR_BATCH=$sync_open_pr_batch"
             echo "APPLY_AUTO_SELECTED_BATCH=$auto_selected_apply_batch"
             echo "APPLY_COMMENT_SYNC_MIN_AGE_DAYS=$comment_sync_min_age_days"
+            echo "APPLY_CLOSE_PROCESSED_LIMIT=$close_processed_limit"
+            echo "APPLY_ADAPTIVE_SCAN_REASON=$adaptive_apply_scan_reason"
           } >> "$GITHUB_ENV"
 
       - name: Commit apply results
