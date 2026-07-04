@@ -15376,8 +15376,9 @@ export function renderReviewCommentFromReport(
   options: ReviewCommentRenderOptions = {},
 ): string {
   const decision = frontMatterValue(markdown, "decision");
+  const requiresMaintainerDecision = maintainerDecisionFromReport(markdown)?.required === true;
   const body =
-    decision === "close" && reason !== "none"
+    decision === "close" && reason !== "none" && !requiresMaintainerDecision
       ? renderCloseCommentFromReport(markdown, reason)
       : renderKeepOpenCommentFromReport(markdown, options);
   const markers = reviewAutomationMarkersFromReport(markdown);

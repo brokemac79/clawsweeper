@@ -93,6 +93,23 @@ test("review comments include a compact maintainer decision packet block", () =>
   assert.match(comment, /Likely owner: @owner/);
 });
 
+test("close proposals that require maintainer decisions render as kept open", () => {
+  const comment = renderReviewCommentFromReport(
+    implementedCloseReport({
+      labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
+      requires_product_decision: "true",
+      maintainer_decision: JSON.stringify(maintainerDecision),
+    }),
+    "implemented_or_shipped",
+  );
+
+  assert.match(comment, /\*\*Maintainer decision needed\*\*/);
+  assert.match(comment, /Should this product contract be accepted\?/);
+  assert.match(comment, /Accept the contract \(recommended\)/);
+  assert.match(comment, /Likely owner: @owner/);
+  assert.doesNotMatch(comment, /Closing this issue/);
+});
+
 test("apply-decisions archives live-closed skipped records without reopening close gates", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
