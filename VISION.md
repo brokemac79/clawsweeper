@@ -28,6 +28,7 @@ A maintainer should be able to answer:
 - what ClawSweeper proposes
 - what ClawSweeper already did
 - why it stopped
+- what the maintainer or contributor should do next
 
 The system should prefer a clear pause over a risky automatic action.
 
@@ -35,6 +36,9 @@ The system should prefer a clear pause over a risky automatic action.
 
 Priority:
 
+- P0: Maintainer and contributor workflow completion UX. A review, repair,
+  apply, or automerge flow that cannot complete or leaves its user without a
+  trustworthy status and next action is release-blocking.
 - Correct, evidence-backed issue and PR reviews.
 - Durable review comments edited in place instead of noisy repeated comments.
 - Real behavior proof before PRs are marked proof-sufficient,
@@ -65,19 +69,27 @@ Maintainer commands, protected labels, human-review labels, and explicit stops
 must override automation. ClawSweeper should make maintainer choices visible,
 not work around them.
 
-### 3. Evidence over volume
+### 3. Workflow UX is part of correctness
+
+When ClawSweeper accepts a command or starts a workflow, its durable comment,
+labels, state record, and dashboard must agree on the current state and next
+safe action. Silent stalls, false success, ambiguous terminal states, and
+errors without a recovery path are P0 release blockers. Automation may stop
+when safety requires it, but it must stop visibly and guide recovery.
+
+### 4. Evidence over volume
 
 A smaller number of high-confidence reviews is better than a large number of
 thin ones. Proof, source links, logs, CI state, and exact-head checks matter more
 than throughput.
 
-### 4. Write credentials stay out of model review
+### 5. Write credentials stay out of model review
 
 Codex and review workers inspect and report. GitHub App tokens for comments,
 labels, branch pushes, closes, checks, and merges are created only in
 deterministic executor steps.
 
-### 5. Public state must be durable and safe
+### 6. Public state must be durable and safe
 
 Durable records, dashboard output, labels, and comments are operational history.
 They should be reproducible, link back to source records, and never expose
