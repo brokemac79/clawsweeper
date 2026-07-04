@@ -162,11 +162,13 @@ export function emptyMaintainerDecision(): MaintainerDecision {
 export function maintainerDecisionFromReport(markdown: string): MaintainerDecision | null {
   const raw = frontMatter(markdown).maintainer_decision;
   if (!raw || raw === "none" || raw === "unknown") return null;
+  let parsed: unknown;
   try {
-    return parseMaintainerDecision(JSON.parse(raw), "maintainer_decision");
+    parsed = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error("maintainer_decision must contain valid JSON");
   }
+  return parseMaintainerDecision(parsed, "maintainer_decision");
 }
 
 export function buildDecisionPacketFromReport(

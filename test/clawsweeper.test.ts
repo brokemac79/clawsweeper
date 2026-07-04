@@ -426,6 +426,43 @@ if (/\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
   }
 });
 
+test("apply-decisions makes no GitHub mutation for malformed maintainer decisions", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+    writeFileSync(
+      join(itemsDir, "321.md"),
+      implementedCloseReport({ maintainer_decision: "{" }),
+      "utf8",
+    );
+
+    const ghMock = `
+console.error("malformed maintainer decision reached GitHub");
+process.exit(1);
+`;
+    withMockGh(root, ghMock, () => {
+      runApplyDecisionsForTest({ itemsDir, closedDir, plansDir, reportPath });
+    });
+
+    assert.equal(existsSync(join(itemsDir, "321.md")), true);
+    assert.equal(existsSync(join(closedDir, "321.md")), false);
+    assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), [
+      {
+        number: 321,
+        action: "kept_open",
+        reason: "invalid maintainer_decision: maintainer_decision must contain valid JSON",
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apply-decisions skips advisory labels for failed or stale kept-open reports", () => {
   const root = mkdtempSync(tmpPrefix);
   try {

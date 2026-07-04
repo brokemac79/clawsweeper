@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   buildDecisionPacketFromReport,
   emptyMaintainerDecision,
+  maintainerDecisionFromReport,
   parseMaintainerDecision,
   syncDecisionPacketRecord,
 } from "../dist/decision-packets.js";
@@ -100,6 +101,20 @@ test("maintainer decision validation requires one recommendation and an exact ow
         question: "A label-derived question",
       }),
     /must be empty when no decision is required/,
+  );
+});
+
+test("present malformed maintainer decisions fail closed", () => {
+  assert.throws(
+    () => maintainerDecisionFromReport(decisionReport({ maintainer_decision: "{" })),
+    /must contain valid JSON/,
+  );
+  assert.throws(
+    () =>
+      maintainerDecisionFromReport(
+        decisionReport({ maintainer_decision: JSON.stringify({ required: true }) }),
+      ),
+    /maintainer_decision/,
   );
 });
 

@@ -17992,6 +17992,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     let storedHash = frontMatterValue(markdown, "item_snapshot_hash");
     let storedUpdatedAt = frontMatterValue(markdown, "item_updated_at");
     const storedAuthorAssociation = frontMatterValue(markdown, "author_association");
+    let requiredMaintainerDecision: MaintainerDecision | null;
     const shouldProbeClosedState = shouldProbeClosedStateReport(markdown);
     const isRetryableSkippedClose = isRetryableCloseSkipReport(markdown);
     const isUpgradedCloseCandidate =
@@ -18038,6 +18039,17 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         "kept_open",
         `GitHub rejected ${labelKind} label sync with Requires authentication`,
       );
+    try {
+      requiredMaintainerDecision = maintainerDecisionFromReport(markdown);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const reason = `invalid maintainer_decision: ${detail}`;
+      results.push({ number, action: "kept_open", reason });
+      processedCount += 1;
+      maybeLogProgress(`skipped #${number}: ${reason}`);
+      if (processedCount >= processedLimit) break;
+      continue;
+    }
     if (!verifiedLocalCheckout && !shouldProbeClosedState) {
       if (markApplySkipped("kept_open", "review lacks verified local checkout access")) break;
       continue;
@@ -19202,7 +19214,6 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     if (!isCloseProposal || !closeReason) {
       continue;
     }
-    const requiredMaintainerDecision = maintainerDecisionFromReport(markdown);
     if (requiredMaintainerDecision?.required) {
       if (
         markApplySkipped(
