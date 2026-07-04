@@ -399,6 +399,7 @@ test("workflow utilities flag operator-action skips when every result is blocked
     "skipped_same_author_pair",
   ]);
   assert.equal(summary.lanes.closure.skipped, 10);
+  assert.equal(summary.lanes.closure.comment_synced, 1);
   assert.equal(summary.lanes.closure.skip_reasons.kept_open, 1);
   assert.equal(summary.lanes.closure.skip_reasons.retry_pr_close_coverage_proof, 1);
   assert.equal(summary.lanes.closure.skip_reasons.skipped_pr_close_coverage_proof, 1);

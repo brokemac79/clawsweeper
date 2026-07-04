@@ -383,7 +383,7 @@ function summarizeApplyLanes(
     const lane = lanes[laneName];
     lane.processed += 1;
     if (entry.action === "closed") lane.closed += 1;
-    if (entry.action === "review_comment_synced") lane.comment_synced += 1;
+    if (reportsReviewCommentSync(entry)) lane.comment_synced += 1;
     if (!isProductiveApplyAction(entry)) {
       lane.skipped += 1;
       lane.skip_reasons[entry.action] = (lane.skip_reasons[entry.action] || 0) + 1;
