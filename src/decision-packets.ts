@@ -171,6 +171,14 @@ export function maintainerDecisionFromReport(markdown: string): MaintainerDecisi
   return parseMaintainerDecision(parsed, "maintainer_decision");
 }
 
+export function maintainerDecisionBlocksClose(markdown: string): boolean {
+  try {
+    return maintainerDecisionFromReport(markdown)?.required === true;
+  } catch {
+    return true;
+  }
+}
+
 export function buildDecisionPacketFromReport(
   markdown: string,
   options: DecisionPacketBuildOptions = {},

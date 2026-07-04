@@ -109,6 +109,7 @@ import {
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
 import {
   emptyMaintainerDecision,
+  maintainerDecisionBlocksClose,
   maintainerDecisionFromReport,
   parseMaintainerDecision,
   renderDecisionPacketPublicBlock,
@@ -18233,12 +18234,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         const counterpartEntry = openFileEntryByNumber.get(counterpartNumber);
         if (counterpartEntry) {
           const counterpartMarkdown = readFileSync(counterpartEntry.path, "utf8");
+          const counterpartMaintainerDecisionBlocked =
+            maintainerDecisionBlocksClose(counterpartMarkdown);
           const counterpartRepo = markdownRepository(counterpartMarkdown, counterpartEntry.path);
           const counterpartReason = reportCloseReason(counterpartMarkdown);
           if (
             counterpartRepo === repo &&
             reportItemKind(counterpartMarkdown) === counterpartKind &&
             counterpartReason &&
+            !counterpartMaintainerDecisionBlocked &&
             closeReasonEnabled(counterpartReason, applyCloseReasons) &&
             isApplyCloseCandidateReport(counterpartMarkdown) &&
             hasAutoCloseAllowedMetadata(counterpartMarkdown) &&
@@ -18327,7 +18331,6 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
             result =
               counterpartState === "open" &&
               counterpartItem.kind === counterpartKind &&
-              !maintainerDecisionFromReport(counterpartMarkdown)?.required &&
               applyBlockingProtectedLabels(counterpartItem.labels, counterpartReason).length ===
                 0 &&
               (isVerifiedFixedCloseReason(counterpartReason) ||

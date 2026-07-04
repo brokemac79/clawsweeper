@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   buildDecisionPacketFromReport,
   emptyMaintainerDecision,
+  maintainerDecisionBlocksClose,
   maintainerDecisionFromReport,
   parseMaintainerDecision,
   syncDecisionPacketRecord,
@@ -105,10 +106,8 @@ test("maintainer decision validation requires one recommendation and an exact ow
 });
 
 test("present malformed maintainer decisions fail closed", () => {
-  assert.throws(
-    () => maintainerDecisionFromReport(decisionReport({ maintainer_decision: "{" })),
-    /must contain valid JSON/,
-  );
+  const malformed = decisionReport({ maintainer_decision: "{" });
+  assert.throws(() => maintainerDecisionFromReport(malformed), /must contain valid JSON/);
   assert.throws(
     () =>
       maintainerDecisionFromReport(
@@ -116,6 +115,14 @@ test("present malformed maintainer decisions fail closed", () => {
       ),
     /maintainer_decision/,
   );
+  assert.equal(maintainerDecisionBlocksClose(malformed), true);
+  assert.equal(
+    maintainerDecisionBlocksClose(
+      decisionReport({ maintainer_decision: JSON.stringify(productDecision) }),
+    ),
+    true,
+  );
+  assert.equal(maintainerDecisionBlocksClose(decisionReport()), false);
 });
 
 test("decision packets prefer reconciled subject state", () => {
