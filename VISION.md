@@ -83,11 +83,12 @@ A smaller number of high-confidence reviews is better than a large number of
 thin ones. Proof, source links, logs, CI state, and exact-head checks matter more
 than throughput.
 
-### 5. Write credentials stay out of model review
+### 5. Models do not own GitHub mutations
 
-Codex and review workers inspect and report. GitHub App tokens for comments,
-labels, branch pushes, closes, checks, and merges are created only in
-deterministic executor steps.
+Review models inspect and report. Repair models may edit, rebase, and validate a
+local checkout, but model subprocesses do not receive GitHub write credentials.
+Deterministic executor steps own comments, labels, branch pushes, closes, checks,
+and merges.
 
 ### 6. Public state must be durable and safe
 
@@ -147,8 +148,10 @@ with exact policy checks and visible evidence.
 - Model-driven GitHub writes without deterministic rechecks.
 - Direct model-provider frameworks in ClawSweeper review or repair workers.
 - PAT fallback paths for production mutations.
-- Automatic closes for maintainer-authored or protected items without verified
+- Automatic closes for maintainer-authored items without verified
   implemented-on-main evidence.
+- Automatic closes for items carrying other protected labels such as
+  `security`, `beta-blocker`, or `release-blocker`.
 - Broad rewrites of scheduler, apply, repair, dashboard, or state storage without
   a narrow proof path.
 - A second dashboard or state mutation engine outside the approved ClawSweeper
