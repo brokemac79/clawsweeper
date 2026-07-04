@@ -461,11 +461,11 @@ the same records cannot create an unbounded runner loop.
 
 Apply and comment-sync Actions run titles include the target repository. Before
 dispatching a default cursor-based apply continuation, the workflow checks
-recent active or queued same-target apply runs and treats one of those runs as
-the continuation instead of adding another pending run. Explicit or non-default
-manual apply continuations still dispatch with their exact inputs. The log says
-which run covered the continuation; the 15-minute schedule remains the fallback
-if the existing run disappears.
+recent active or queued same-target default cursor runs and treats one of those
+runs as the continuation instead of adding another pending run. Custom-input
+and explicit-item runs have a different title and cannot suppress the default
+cursor lane; their own continuations still dispatch with the exact inputs. The
+log identifies the default cursor run that covered the continuation.
 
 ## Continuation and Recovery
 

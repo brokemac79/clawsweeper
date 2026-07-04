@@ -136,7 +136,8 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
     applyJob.indexOf("- name: Queue review backstops"),
   );
 
-  assert.match(workflow, /format\('Apply ClawSweeper closures for \{0\}'/);
+  assert.match(workflow, /format\('Apply default ClawSweeper closures for \{0\}'/);
+  assert.match(workflow, /format\('Apply custom ClawSweeper closures for \{0\}'/);
   assert.match(
     workflow,
     /github\.event\.schedule == '8,23,38,53 \* \* \* \*'\) && 'openclaw\/clawhub'/,
@@ -200,17 +201,13 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
     /gh api --paginate "repos\/\$\{\{ github\.repository \}\}\/actions\/runs\?per_page=100&status=\$\{run_status\}"/,
   );
   assert.match(continueStep, /workflowPath:\.path/);
-  assert.match(continueStep, /run\.workflowPath !== "\.github\/workflows\/sweep\.yml"/);
   assert.doesNotMatch(continueStep, /workflowName:\.name/);
-  assert.doesNotMatch(continueStep, /run\.workflowName !== "ClawSweeper"/);
   assert.doesNotMatch(continueStep, /gh run list/);
-  assert.match(continueStep, /const seen = new Set\(\)/);
-  assert.match(continueStep, /seen\.has\(id\)/);
-  assert.match(continueStep, /expectedTitle = `Apply ClawSweeper closures for \$\{targetRepo\}`/);
-  assert.match(continueStep, /\n          NODE\n/);
-  assert.doesNotMatch(continueStep, /\n            NODE\n/);
-  assert.match(continueStep, /String\(run\.databaseId \|\| ""\) === currentRunId/);
+  assert.match(continueStep, /pnpm run --silent workflow -- apply-continuation-blocker/);
+  assert.match(continueStep, /--current-run-id "\$\{\{ github\.run_id \}\}"/);
+  assert.match(continueStep, /--target-repo "\$\{APPLY_TARGET_REPO:-openclaw\/openclaw\}"/);
   assert.match(continueStep, /APPLY_CONTINUATION_BLOCKED/);
+  assert.match(continueStep, /existing default cursor run will continue the lane/);
   assert.match(continueStep, /already covered by \$/);
   assert.match(continueStep, /-f apply_item_numbers="\$APPLY_ITEM_NUMBERS"/);
   assert.doesNotMatch(continueStep, /APPLY_CLOSED_TOTAL:-0.*APPLY_LIMIT:-0/);
