@@ -320,64 +320,6 @@ export function appendFloorBackfillCandidates<
   return filled;
 }
 
-export function selectDueCandidateNumbersForTest(
-  due: Array<{
-    item: SchedulerItem;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  limit: number,
-  now = Date.now(),
-): number[] {
-  return selectDueCandidates(
-    due.map((candidate) => ({
-      item: candidate.item,
-      review: null,
-      priority: candidate.priority ?? reviewPriority(candidate.item, null),
-      reviewedAt: candidate.reviewedAt ?? 0,
-      nextDueAt: candidate.nextDueAt ?? 0,
-      bucket: candidate.bucket,
-    })),
-    limit,
-    compareDueCandidates,
-    now,
-  ).map((candidate) => candidate.item.number);
-}
-
-export function appendFloorBackfillCandidateNumbersForTest(
-  selected: Array<{
-    item: SchedulerItem;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  backfill: Array<{
-    item: SchedulerItem;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  activeFloor: number,
-  capacity: number,
-): number[] {
-  const normalize = (candidate: (typeof selected)[number]): SchedulerDueCandidate => ({
-    item: candidate.item,
-    review: null,
-    priority: candidate.priority ?? reviewPriority(candidate.item, null),
-    reviewedAt: candidate.reviewedAt ?? 0,
-    nextDueAt: candidate.nextDueAt ?? 0,
-    bucket: candidate.bucket,
-  });
-  return appendFloorBackfillCandidates(selected.map(normalize), backfill.map(normalize), {
-    activeFloor,
-    capacity,
-  }).map((candidate) => candidate.item.number);
-}
-
 export function compareHotIntakeDueCandidates<
   ItemT extends SchedulerItem,
   ReviewT extends SchedulerExistingReview,

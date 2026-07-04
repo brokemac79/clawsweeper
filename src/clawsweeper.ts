@@ -116,15 +116,6 @@ export {
   isLockedConversationCommentError,
   shouldRetryGh,
 } from "./github-retry.js";
-export {
-  appendFloorBackfillCandidateNumbersForTest,
-  hotIntakeRecencyMs,
-  reviewPriority,
-  selectDueCandidateNumbersForTest,
-  shouldReviewItem,
-  shouldStopSaturatedPlanScan,
-} from "./scheduler-policy.js";
-
 type ItemKind = "issue" | "pull_request";
 type ApplyKind = ItemKind | "all";
 type DecisionKind = "close" | "keep_open";
