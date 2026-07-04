@@ -18154,6 +18154,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     };
     const sameAuthorPairStartCloseable = new Map<string, boolean>();
     const currentCloseGatesPassed = (): boolean => {
+      if (requiredMaintainerDecision?.required) return false;
       if (!closeReason || !closeReasonEnabled(closeReason, applyCloseReasons)) return false;
       if (needsReviewCommentSync) return false;
       if (
@@ -18326,6 +18327,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
             result =
               counterpartState === "open" &&
               counterpartItem.kind === counterpartKind &&
+              !maintainerDecisionFromReport(counterpartMarkdown)?.required &&
               applyBlockingProtectedLabels(counterpartItem.labels, counterpartReason).length ===
                 0 &&
               (isVerifiedFixedCloseReason(counterpartReason) ||
