@@ -9,6 +9,7 @@ const QUEUED_RUN_STATUSES = new Set(["queued", "waiting", "requested", "pending"
 type DashboardEnv = Record<string, unknown>;
 type DashboardContext = { waitUntil?: (promise: Promise<unknown>) => void };
 type GithubAppJsonOptions = { method?: string; body?: BodyInit; errorLabel?: string };
+type GithubJsonReader = (path: string) => ReturnType<typeof githubJson>;
 type StoredValue = { value: string; expires_at?: number };
 type WorkflowRunSummary = {
   id: number | string;
@@ -71,7 +72,8 @@ const CLOSED_STATS_PAGE_LIMIT = 10;
 const DEFAULT_CLAWSWEEPER_BOT_LOGINS = ["clawsweeper[bot]", "openclaw-clawsweeper[bot]"];
 const GITHUB_TIMEOUT_MS = 4500;
 const DEFAULT_STALE_QUEUED_WORKFLOW_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_EXACT_REVIEW_QUEUE_MAX_CONCURRENT = 40;
+const DEFAULT_EXACT_REVIEW_QUEUE_MAX_CONCURRENT = 20;
+const DEFAULT_EXACT_REVIEW_TARGET_MAX_CONCURRENT = 16;
 const DEFAULT_EXACT_REVIEW_DISPATCH_LEASE_MS = 10 * 60 * 1000;
 const DEFAULT_EXACT_REVIEW_EXECUTION_LEASE_MS = 130 * 60 * 1000;
 const DEFAULT_EXACT_REVIEW_RETRY_MS = 30_000;
@@ -431,8 +433,21 @@ export class ExactReviewQueue {
     }
 
     if (request.method === "GET" && url.pathname === "/stats") {
+      const now = Date.now();
       const state = await this.readState();
-      return json(exactReviewQueueStats(state));
+      // Dashboard reads are also the operational heartbeat. Reclaim leases and
+      // restore the alarm here so a deploy or lost alarm cannot strand backlog.
+      const changed = reclaimExpiredExactReviewLeases(state, now);
+      if (changed) await this.writeState(state);
+      await this.scheduleNext(state, now);
+      return json(
+        exactReviewQueueStats(
+          state,
+          now,
+          exactReviewQueueCapacity(this.env),
+          exactReviewTargetCapacity(this.env),
+        ),
+      );
     }
 
     return new Response("not found", { status: 404 });
@@ -440,14 +455,30 @@ export class ExactReviewQueue {
 
   async alarm() {
     const now = Date.now();
+    await this.storage.deleteAlarm();
     const state = await this.readState();
     let changed = reclaimExpiredExactReviewLeases(state, now);
     const capacity = exactReviewQueueCapacity(this.env);
+    const targetCapacity = exactReviewTargetCapacity(this.env);
     const slots = Math.max(0, capacity - exactReviewQueueActiveCount(state));
-    const admitted = Object.values(state.items)
+    const activeTargets = new Map<string, number>();
+    for (const item of Object.values(state.items)) {
+      if (item.state !== "dispatching" && item.state !== "leased") continue;
+      const target = item.decision.targetRepo;
+      activeTargets.set(target, (activeTargets.get(target) || 0) + 1);
+    }
+    const admitted: ExactReviewQueueItem[] = [];
+    const pending = Object.values(state.items)
       .filter((item) => item.state === "pending" && item.nextAttemptAt <= now)
-      .sort((left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key))
-      .slice(0, slots);
+      .sort((left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key));
+    for (const item of pending) {
+      if (admitted.length >= slots) break;
+      const target = item.decision.targetRepo;
+      const active = activeTargets.get(target) || 0;
+      if (active >= targetCapacity) continue;
+      activeTargets.set(target, active + 1);
+      admitted.push(item);
+    }
 
     for (const item of admitted) {
       item.state = "dispatching";
@@ -501,12 +532,18 @@ export class ExactReviewQueue {
   }
 
   private async scheduleNext(state: ExactReviewQueueState, now: number) {
-    const next = exactReviewQueueNextWakeAt(state, now);
+    const next = exactReviewQueueNextWakeAt(
+      state,
+      now,
+      exactReviewQueueCapacity(this.env),
+      exactReviewTargetCapacity(this.env),
+    );
     if (next === null) {
       await this.storage.deleteAlarm();
       return;
     }
-    await this.storage.setAlarm(next);
+    const scheduled = await this.storage.getAlarm();
+    if (scheduled === null || next < scheduled) await this.storage.setAlarm(next);
   }
 }
 
@@ -1156,9 +1193,62 @@ function exactReviewQueueActiveCount(state: ExactReviewQueueState) {
   ).length;
 }
 
-function exactReviewQueueStats(state: ExactReviewQueueState) {
+function exactReviewQueueStats(
+  state: ExactReviewQueueState,
+  now = Date.now(),
+  capacity = Number.POSITIVE_INFINITY,
+  targetCapacity = Number.POSITIVE_INFINITY,
+) {
   const items = Object.values(state.items);
   const pending = items.filter((item) => item.state === "pending");
+  const targets = new Map<
+    string,
+    {
+      target_repo: string;
+      pending: number;
+      dispatching: number;
+      leased: number;
+      oldest_pending_at: number | null;
+    }
+  >();
+  for (const item of items) {
+    const targetRepo = item.decision.targetRepo;
+    const current = targets.get(targetRepo) ?? {
+      target_repo: targetRepo,
+      pending: 0,
+      dispatching: 0,
+      leased: 0,
+      oldest_pending_at: null,
+    };
+    if (item.state === "pending") {
+      current.pending += 1;
+      current.oldest_pending_at =
+        current.oldest_pending_at === null
+          ? item.createdAt
+          : Math.min(current.oldest_pending_at, item.createdAt);
+    } else if (item.state === "dispatching") {
+      current.dispatching += 1;
+    } else {
+      current.leased += 1;
+    }
+    targets.set(targetRepo, current);
+  }
+  const targetStats = [...targets.values()]
+    .map((target) => ({
+      target_repo: target.target_repo,
+      pending: target.pending,
+      dispatching: target.dispatching,
+      leased: target.leased,
+      oldest_pending_at:
+        target.oldest_pending_at === null ? null : new Date(target.oldest_pending_at).toISOString(),
+    }))
+    .sort(
+      (left, right) =>
+        right.pending - left.pending ||
+        right.dispatching + right.leased - (left.dispatching + left.leased) ||
+        left.target_repo.localeCompare(right.target_repo),
+    );
+  const nextWakeAt = exactReviewQueueNextWakeAt(state, now, capacity, targetCapacity);
   return {
     pending: pending.length,
     dispatching: items.filter((item) => item.state === "dispatching").length,
@@ -1166,14 +1256,60 @@ function exactReviewQueueStats(state: ExactReviewQueueState) {
     oldest_pending_at: pending.length
       ? new Date(Math.min(...pending.map((item) => item.createdAt))).toISOString()
       : null,
+    oldest_pending_age_seconds: pending.length
+      ? Math.max(0, Math.floor((now - Math.min(...pending.map((item) => item.createdAt))) / 1000))
+      : null,
+    next_wake_at: nextWakeAt === null ? null : new Date(nextWakeAt).toISOString(),
+    target_stats: targetStats,
   };
 }
 
-function exactReviewQueueNextWakeAt(state: ExactReviewQueueState, now: number) {
+function exactReviewQueueNextWakeAt(
+  state: ExactReviewQueueState,
+  now: number,
+  capacity = Number.POSITIVE_INFINITY,
+  targetCapacity = Number.POSITIVE_INFINITY,
+) {
   const items = Object.values(state.items);
   if (!items.length) return null;
+  const activeItems = items.filter(
+    (item) => item.state === "dispatching" || item.state === "leased",
+  );
+  const activeLeaseWakeAt = activeItems
+    .map((item) => item.leaseExpiresAt)
+    .filter((value): value is number => Boolean(value && value > now));
+  if (activeItems.some((item) => !item.leaseExpiresAt || item.leaseExpiresAt <= now)) {
+    return now + 1_000;
+  }
+  if (activeItems.length >= capacity && activeLeaseWakeAt.length) {
+    return Math.max(now + 1_000, Math.min(...activeLeaseWakeAt));
+  }
+  const activeTargetWakeAt = new Map<string, number>();
+  const activeTargetCounts = new Map<string, number>();
+  for (const item of items) {
+    if (
+      (item.state === "dispatching" || item.state === "leased") &&
+      item.leaseExpiresAt &&
+      item.leaseExpiresAt > now
+    ) {
+      const target = item.decision.targetRepo;
+      activeTargetCounts.set(target, (activeTargetCounts.get(target) || 0) + 1);
+      const current = activeTargetWakeAt.get(item.decision.targetRepo);
+      activeTargetWakeAt.set(
+        target,
+        current === undefined ? item.leaseExpiresAt : Math.min(current, item.leaseExpiresAt),
+      );
+    }
+  }
   const times = items.flatMap((item) => {
-    if (item.state === "pending") return [item.nextAttemptAt];
+    if (item.state === "pending") {
+      const target = item.decision.targetRepo;
+      const blockedUntil =
+        (activeTargetCounts.get(target) || 0) >= targetCapacity
+          ? activeTargetWakeAt.get(target)
+          : undefined;
+      return [blockedUntil ?? item.nextAttemptAt];
+    }
     return item.leaseExpiresAt ? [item.leaseExpiresAt] : [];
   });
   if (!times.length) return now + DEFAULT_EXACT_REVIEW_RETRY_MS;
@@ -1192,8 +1328,21 @@ export function exactReviewQueueCapacity(env) {
   return Math.max(
     1,
     Math.min(
-      64,
+      32,
       numberFrom(env.EXACT_REVIEW_QUEUE_MAX_CONCURRENT, DEFAULT_EXACT_REVIEW_QUEUE_MAX_CONCURRENT),
+    ),
+  );
+}
+
+function exactReviewTargetCapacity(env) {
+  return Math.max(
+    1,
+    Math.min(
+      exactReviewQueueCapacity(env),
+      numberFrom(
+        env.EXACT_REVIEW_TARGET_MAX_CONCURRENT,
+        DEFAULT_EXACT_REVIEW_TARGET_MAX_CONCURRENT,
+      ),
     ),
   );
 }
@@ -1578,6 +1727,7 @@ async function statusSnapshot(env) {
   const cached = await readCachedSnapshot(env, ttl);
   if (cached) return cached;
 
+  const github = createGithubJsonCache(env);
   const generatedAt = new Date().toISOString();
   const errors = [];
   const repo = env.CLAWSWEEPER_REPO || "openclaw/clawsweeper";
@@ -1587,15 +1737,15 @@ async function statusSnapshot(env) {
     .filter(Boolean);
   const budget = numberFrom(env.WORKER_BUDGET, 128);
   const [runs, completedRuns, filteredActiveRuns] = await Promise.all([
-    githubJson(env, `/repos/${repo}/actions/runs?per_page=100`).catch((error) => {
+    github(`/repos/${repo}/actions/runs?per_page=100`).catch((error) => {
       errors.push(`workflow runs: ${error.message}`);
       return null;
     }),
-    githubJson(env, `/repos/${repo}/actions/runs?status=completed&per_page=100`).catch((error) => {
+    github(`/repos/${repo}/actions/runs?status=completed&per_page=100`).catch((error) => {
       errors.push(`workflow runs completed: ${error.message}`);
       return null;
     }),
-    activeWorkflowRuns(env, repo, errors),
+    activeWorkflowRuns(env, repo, errors, github),
   ]);
   const workflowRuns = Array.isArray(runs?.workflow_runs) ? runs.workflow_runs : [];
   const completedWorkflowRuns = uniqueWorkflowRuns([
@@ -1615,11 +1765,11 @@ async function statusSnapshot(env) {
       codexJobName(`${run.name || ""} ${run.display_title || ""}`) &&
       TERMINAL_BAD_CONCLUSIONS.has(String(run.conclusion)),
   );
-  const activeJobs = await activeWorkerSnapshot(env, repo, workerRuns);
-  const [workerHealth, pipeline, clusterRepair, automerge, closed, storedEvents] =
+  const activeJobs = await activeWorkerSnapshot(env, repo, workerRuns, github);
+  const [workerHealth, pipeline, clusterRepair, applyHealth, automerge, closed, storedEvents] =
     await Promise.all([
       withTimeout(
-        recentWorkerHealth(env, repo, completedWorkflowRuns),
+        recentWorkerHealth(env, repo, completedWorkflowRuns, github),
         OPTIONAL_SECTION_TIMEOUT_MS * 2,
         "worker health",
       ).catch((error) => {
@@ -1627,7 +1777,7 @@ async function statusSnapshot(env) {
         return emptyWorkerHealth(generatedAt);
       }),
       withTimeout(
-        pipelineItems(env, workerRuns.slice(0, 30)),
+        pipelineItems(env, workerRuns.slice(0, 30), github),
         OPTIONAL_SECTION_TIMEOUT_MS,
         "pipeline",
       ).catch((error) => {
@@ -1635,7 +1785,7 @@ async function statusSnapshot(env) {
         return workerRuns.slice(0, 30).map((run) => classifyRun(run));
       }),
       withTimeout(
-        clusterRepairStatus(env, repo, targetRepos, activeRuns),
+        clusterRepairStatus(env, repo, targetRepos, activeRuns, github),
         OPTIONAL_SECTION_TIMEOUT_MS,
         "cluster repair intake",
       ).catch((error) => {
@@ -1643,7 +1793,15 @@ async function statusSnapshot(env) {
         return emptyClusterRepairStatus(targetRepos);
       }),
       withTimeout(
-        recentAutomerge(env, targetRepos[0] || "openclaw/openclaw"),
+        applyHealthStatus(env, targetRepos, github),
+        OPTIONAL_SECTION_TIMEOUT_MS,
+        "apply health",
+      ).catch((error) => {
+        errors.push(error.message);
+        return emptyApplyHealthStatus(targetRepos);
+      }),
+      withTimeout(
+        recentAutomerge(env, targetRepos[0] || "openclaw/openclaw", github),
         OPTIONAL_SECTION_TIMEOUT_MS,
         "automerge timing",
       ).catch((error) => {
@@ -1651,7 +1809,7 @@ async function statusSnapshot(env) {
         return { average_ms: null, samples: 0, items: [] };
       }),
       withTimeout(
-        recentClawsweeperClosed(env, targetRepos),
+        recentClawsweeperClosed(env, targetRepos, github),
         OPTIONAL_SECTION_TIMEOUT_MS,
         "recent closed",
       ).catch((error) => {
@@ -1696,6 +1854,7 @@ async function statusSnapshot(env) {
     pipeline,
     recent: {
       cluster_repair: clusterRepair,
+      apply_health: applyHealth,
       automerge: automerge.items,
       closed_items: closed.items,
       closed_stats: closed.stats,
@@ -2575,7 +2734,12 @@ function githubSearchUrl(query) {
   return `https://github.com/issues?q=${encodeURIComponent(query)}&s=created&o=desc`;
 }
 
-async function activeWorkerSnapshot(env, repo, runs) {
+async function activeWorkerSnapshot(
+  env,
+  repo,
+  runs,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const detailRunLimit = Math.max(
     1,
     numberFrom(env.WORKER_DETAIL_RUN_LIMIT, DEFAULT_WORKER_DETAIL_RUN_LIMIT),
@@ -2587,7 +2751,7 @@ async function activeWorkerSnapshot(env, repo, runs) {
   const detailRuns: WorkflowRunSummary[] = runs.slice(0, detailRunLimit);
   const results = await mapWithConcurrency(detailRuns, fetchConcurrency, async (run) => {
     try {
-      const jobs = await workflowJobsForRun(env, repo, run.id);
+      const jobs = await workflowJobsForRun(env, repo, run.id, github);
       return {
         run,
         workers: jobs
@@ -2657,7 +2821,12 @@ async function activeWorkerSnapshot(env, repo, runs) {
   };
 }
 
-async function recentWorkerHealth(env, repo, runs: WorkflowRunSummary[]) {
+async function recentWorkerHealth(
+  env,
+  repo,
+  runs: WorkflowRunSummary[],
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const cacheKey = `worker-health:v1:${String(repo || "").toLowerCase()}`;
   const cached = await readStoredJson(env, cacheKey);
   if (cached) return cached;
@@ -2680,7 +2849,7 @@ async function recentWorkerHealth(env, repo, runs: WorkflowRunSummary[]) {
   const results = await mapWithConcurrency(completedRuns, fetchConcurrency, async (run) => {
     try {
       return {
-        attempts: (await workflowJobsForRun(env, repo, run.id))
+        attempts: (await workflowJobsForRun(env, repo, run.id, github))
           .filter((job) => isCodexWorkerJob(job))
           .map((job) => workerHealthAttempt(run, job))
           .filter(Boolean),
@@ -2947,14 +3116,18 @@ async function mapWithConcurrency<Item, Result>(
   return results;
 }
 
-async function workflowJobsForRun(env, repo, runId) {
+async function workflowJobsForRun(
+  env,
+  repo,
+  runId,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const key = `workflow-jobs:${repo}:${runId}`;
   const cached = await readStoredJson(env, key);
   if (Array.isArray(cached)) return cached;
   const jobs = [];
   for (let page = 1; page <= WORKER_JOB_PAGE_LIMIT; page += 1) {
-    const payload = await githubJson(
-      env,
+    const payload = await github(
       `/repos/${repo}/actions/runs/${runId}/jobs?filter=latest&per_page=100&page=${page}`,
     );
     const pageJobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
@@ -3127,16 +3300,20 @@ function workerStatusRank(status) {
   return 2;
 }
 
-async function activeWorkflowRuns(env, repo, errors) {
+async function activeWorkflowRuns(
+  env,
+  repo,
+  errors,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const pages = await Promise.all(
     ACTIVE_RUN_STATUS_FILTERS.map(async (status) => {
-      const runs = await githubJson(
-        env,
-        `/repos/${repo}/actions/runs?status=${status}&per_page=100`,
-      ).catch((error) => {
-        errors.push(`workflow runs ${status}: ${error.message}`);
-        return null;
-      });
+      const runs = await github(`/repos/${repo}/actions/runs?status=${status}&per_page=100`).catch(
+        (error) => {
+          errors.push(`workflow runs ${status}: ${error.message}`);
+          return null;
+        },
+      );
       return Array.isArray(runs?.workflow_runs) ? runs.workflow_runs : [];
     }),
   );
@@ -3177,7 +3354,11 @@ function newestWorkflowRunFirst(left, right) {
   return Date.parse(right.created_at || "") - Date.parse(left.created_at || "");
 }
 
-async function pipelineItems(env, runs) {
+async function pipelineItems(
+  env,
+  runs,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const items = [];
   const prCandidates = [];
   for (const run of runs) {
@@ -3191,7 +3372,7 @@ async function pipelineItems(env, runs) {
       prCandidates
         .filter((item) => !item.ci || item.ci.source === "workflow" || item.ci.state === "unknown")
         .slice(0, 4)
-        .map((item) => attachCiStatus(env, item)),
+        .map((item) => attachCiStatus(env, item, github)),
     );
   }
   return items.sort(
@@ -3278,12 +3459,15 @@ async function attachStoredCiStatuses(env, items) {
   );
 }
 
-async function attachCiStatus(env, item) {
+async function attachCiStatus(
+  env,
+  item,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   try {
-    const pr = await githubJson(env, `/repos/${item.repository}/pulls/${item.item_number}`);
+    const pr = await github(`/repos/${item.repository}/pulls/${item.item_number}`);
     if (!pr?.head?.sha) return;
-    const checks = await githubJson(
-      env,
+    const checks = await github(
       `/repos/${item.repository}/commits/${pr.head.sha}/check-runs?per_page=100`,
     );
     const runs = Array.isArray(checks?.check_runs) ? checks.check_runs : [];
@@ -3307,37 +3491,20 @@ async function attachCiStatus(env, item) {
   }
 }
 
-async function recentAutomerge(env, repo) {
+async function recentAutomerge(
+  env,
+  repo,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const cacheKey = `recent-automerge:${String(repo).toLowerCase()}`;
   const cached = await readStoredJson(env, cacheKey);
   if (cached?.items && Array.isArray(cached.items)) return cached;
 
-  const search = await githubJson(
-    env,
+  const search = await github(
     `/search/issues?q=${encodeURIComponent(`repo:${repo} is:pr is:merged label:clawsweeper:automerge sort:updated-desc`)}&per_page=${AVERAGE_LIMIT}`,
   );
-  const items = await Promise.all(
-    (Array.isArray(search?.items) ? search.items : []).map(async (issue) => {
-      const number = issue.number;
-      const [pr, comments] = await Promise.all([
-        githubJson(env, `/repos/${repo}/pulls/${number}`),
-        githubJson(env, `/repos/${repo}/issues/${number}/comments?per_page=100`),
-      ]);
-      const commandAt = firstAutomergeCommandAt(comments);
-      const mergedAt = pr?.merged_at || null;
-      const durationMs =
-        commandAt && mergedAt ? Date.parse(mergedAt) - Date.parse(commandAt) : null;
-      return {
-        url: issue.html_url,
-        title: issue.title,
-        number,
-        command_at: commandAt,
-        merged_at: mergedAt,
-        duration_ms: durationMs,
-        merge_commit_sha: pr?.merge_commit_sha || null,
-      };
-    }),
-  );
+  const issues = Array.isArray(search?.items) ? search.items : [];
+  const items = await recentAutomergeItems(env, repo, issues, github);
   const durations = items
     .map((item) => item.duration_ms)
     .filter((value) => Number.isFinite(value) && value >= 0);
@@ -3357,13 +3524,102 @@ async function recentAutomerge(env, repo) {
   return result;
 }
 
-async function clusterRepairStatus(env, repo, targetRepos, activeRuns) {
+async function recentAutomergeItems(env, repo, issues, github: GithubJsonReader) {
+  if (hasGithubAuth(env) && issues.length) {
+    try {
+      return await recentAutomergeItemsGraphql(env, repo, issues);
+    } catch {
+      // Keep dashboards on the existing REST path when GraphQL hydration is unavailable.
+    }
+  }
+  return Promise.all(issues.map((issue) => recentAutomergeItemRest(repo, issue, github)));
+}
+
+async function recentAutomergeItemsGraphql(env, repo, issues) {
+  const [owner, name] = String(repo || "").split("/");
+  if (!owner || !name) throw new Error(`invalid repository ${repo}`);
+  const aliases = issues
+    .map(
+      (issue, index) => `
+        pr${index}: pullRequest(number: ${Number(issue.number)}) {
+          mergedAt
+          mergeCommit { oid }
+          comments(first: 100) {
+            nodes {
+              body
+              createdAt
+            }
+          }
+        }`,
+    )
+    .join("\n");
+  const data = await githubGraphql(
+    env,
+    `query RecentAutomerge($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        ${aliases}
+      }
+    }`,
+    { owner, name },
+  );
+  const repository = data?.repository || {};
+  return issues.map((issue, index) => {
+    const pr = repository[`pr${index}`];
+    if (!pr) throw new Error(`missing automerge PR ${issue.number}`);
+    const comments = Array.isArray(pr?.comments?.nodes)
+      ? pr.comments.nodes.map((comment) => ({
+          body: comment?.body || "",
+          created_at: comment?.createdAt || null,
+        }))
+      : [];
+    return recentAutomergeItem(issue, {
+      merged_at: pr.mergedAt || null,
+      merge_commit_sha: pr.mergeCommit?.oid || null,
+      comments,
+    });
+  });
+}
+
+async function recentAutomergeItemRest(repo, issue, github: GithubJsonReader) {
+  const number = issue.number;
+  const [pr, comments] = await Promise.all([
+    github(`/repos/${repo}/pulls/${number}`),
+    github(`/repos/${repo}/issues/${number}/comments?per_page=100`),
+  ]);
+  return recentAutomergeItem(issue, {
+    merged_at: pr?.merged_at || null,
+    merge_commit_sha: pr?.merge_commit_sha || null,
+    comments,
+  });
+}
+
+function recentAutomergeItem(issue, details) {
+  const commandAt = firstAutomergeCommandAt(details.comments);
+  const mergedAt = details.merged_at || null;
+  const durationMs = commandAt && mergedAt ? Date.parse(mergedAt) - Date.parse(commandAt) : null;
+  return {
+    url: issue.html_url,
+    title: issue.title,
+    number: issue.number,
+    command_at: commandAt,
+    merged_at: mergedAt,
+    duration_ms: durationMs,
+    merge_commit_sha: details.merge_commit_sha || null,
+  };
+}
+
+async function clusterRepairStatus(
+  env,
+  repo,
+  targetRepos,
+  activeRuns,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const [workflowRuns, markers] = await Promise.all([
-    githubJson(
-      env,
+    github(
       `/repos/${repo}/actions/workflows/${encodeURIComponent(CLUSTER_REPAIR_INTAKE_WORKFLOW)}/runs?per_page=5`,
     ).catch(() => ({ workflow_runs: [] })),
-    Promise.all(targetRepos.map((targetRepo) => readClusterRepairMarker(env, targetRepo))),
+    Promise.all(targetRepos.map((targetRepo) => readClusterRepairMarker(env, targetRepo, github))),
   ]);
   const intakeRuns = Array.isArray(workflowRuns?.workflow_runs) ? workflowRuns.workflow_runs : [];
   return {
@@ -3379,14 +3635,234 @@ async function clusterRepairStatus(env, repo, targetRepos, activeRuns) {
   };
 }
 
-async function readClusterRepairMarker(env, targetRepo) {
+async function applyHealthStatus(
+  env,
+  targetRepos,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
+  const items = await Promise.all(
+    targetRepos.map((targetRepo) => readApplyHealthMarker(env, targetRepo, github)),
+  );
+  const attention = items.filter((item) => applyHealthNeedsAttention(item.status));
+  return {
+    items,
+    attention_count: attention.length,
+    latest_attention_at: latestIso(attention.map((item) => item.updated_at)),
+  };
+}
+
+async function readApplyHealthMarker(
+  env,
+  targetRepo,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
+  const stateRepo = String(env.CLAWSWEEPER_STATE_REPO || CLAWSWEEPER_STATE_REPO);
+  const stateRef = String(env.CLAWSWEEPER_STATE_REF || CLAWSWEEPER_STATE_REF);
+  const repoSlug = String(targetRepo || "").replace(/\//g, "-");
+  const statusPath = `results/sweep-status/${repoSlug}.json`;
+  try {
+    const content = await github(
+      `/repos/${stateRepo}/contents/${githubPath(statusPath)}?ref=${encodeURIComponent(stateRef)}`,
+    );
+    const status = parseJsonObject(decodeGithubContent(content?.content)) || {};
+    const health = objectValue(status.apply_health);
+    const skipReasons = numericRecord(health.skip_reasons);
+    const nextActions = applyHealthNextActions(health.next_actions);
+    const cursor = objectValue(health.cursor);
+    return {
+      target_repo: nullableString(status.target_repo) || targetRepo,
+      status_path: statusPath,
+      state: nullableString(status.state),
+      detail: nullableString(status.detail),
+      run_url: nullableString(status.run_url),
+      updated_at: nullableString(health.generated_at) || nullableString(status.updated_at),
+      mode: nullableString(health.mode),
+      status: nullableString(health.status) || "unavailable",
+      summary: nullableString(health.summary),
+      processed: numberOrNull(health.processed),
+      processed_limit: numberOrNull(health.processed_limit),
+      close_limit: numberOrNull(health.close_limit),
+      closed: numberOrNull(health.closed),
+      comment_synced: numberOrNull(health.comment_synced),
+      skipped: numberOrNull(health.skipped),
+      skip_reasons: skipReasons,
+      cursor_required: health.cursor_required === true,
+      lanes: applyHealthLanes(health.lanes),
+      next_actions: nextActions,
+      next_action_buckets: numericRecord(health.next_action_buckets),
+      cycle: applyHealthCycle(health.cycle),
+      attention_reasons: Array.isArray(health.attention_reasons)
+        ? health.attention_reasons
+            .map((reason) => String(reason))
+            .filter(Boolean)
+            .slice(0, 8)
+        : [],
+      cursor: cursor.next_after_number
+        ? {
+            next_after_number: numberOrNull(cursor.next_after_number),
+            next_after_apply_checked_at: nullableString(cursor.next_after_apply_checked_at),
+            updated_at: nullableString(cursor.updated_at),
+          }
+        : null,
+    };
+  } catch {
+    return {
+      target_repo: targetRepo,
+      status_path: statusPath,
+      state: null,
+      detail: null,
+      run_url: null,
+      updated_at: null,
+      mode: null,
+      status: "unavailable",
+      summary: null,
+      processed: null,
+      processed_limit: null,
+      close_limit: null,
+      closed: null,
+      comment_synced: null,
+      skipped: null,
+      skip_reasons: {},
+      cursor_required: false,
+      lanes: emptyApplyHealthLanes(),
+      next_actions: [],
+      next_action_buckets: {},
+      cycle: emptyApplyHealthCycle(),
+      attention_reasons: [],
+      cursor: null,
+    };
+  }
+}
+
+function emptyApplyHealthStatus(targetRepos) {
+  return {
+    items: targetRepos.map((targetRepo) => ({
+      target_repo: targetRepo,
+      status_path: `results/sweep-status/${String(targetRepo || "").replace(/\//g, "-")}.json`,
+      status: "unavailable",
+      updated_at: null,
+      skip_reasons: {},
+      cursor_required: false,
+      lanes: emptyApplyHealthLanes(),
+      next_actions: [],
+      next_action_buckets: {},
+      cycle: emptyApplyHealthCycle(),
+      attention_reasons: [],
+      cursor: null,
+    })),
+    attention_count: 0,
+    latest_attention_at: null,
+  };
+}
+
+function applyHealthNeedsAttention(status) {
+  return ["attention", "blocked", "degraded", "failed", "needs_attention", "warning"].includes(
+    String(status || "").toLowerCase(),
+  );
+}
+
+function applyHealthLanes(value) {
+  const source = objectValue(value);
+  return {
+    closure: applyHealthLane(source.closure),
+    comment_sync: applyHealthLane(source.comment_sync),
+  };
+}
+
+function emptyApplyHealthLanes() {
+  return {
+    closure: applyHealthLane(null),
+    comment_sync: applyHealthLane(null),
+  };
+}
+
+function applyHealthLane(value) {
+  const source = objectValue(value);
+  return {
+    processed: numberOrNull(source.processed),
+    closed: numberOrNull(source.closed),
+    comment_synced: numberOrNull(source.comment_synced),
+    skipped: numberOrNull(source.skipped),
+    skip_reasons: numericRecord(source.skip_reasons),
+  };
+}
+
+function applyHealthNextActions(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      const source = objectValue(entry);
+      const reason = nullableString(source.reason);
+      if (!reason) return null;
+      return {
+        reason,
+        count: numberOrNull(source.count),
+        bucket: nullableString(source.bucket),
+        owner: nullableString(source.owner),
+        retryable: Boolean(source.retryable),
+        label: nullableString(source.label),
+        summary: nullableString(source.summary),
+        next_step: nullableString(source.next_step),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function applyHealthCycle(value) {
+  const source = objectValue(value);
+  return {
+    basis: nullableString(source.basis),
+    apply_ready_count: optionalNumber(source.apply_ready_count),
+    window_size: optionalNumber(source.window_size),
+    estimated_full_cycle_windows: optionalNumber(source.estimated_full_cycle_windows),
+    estimated_full_cycle_minutes: optionalNumber(source.estimated_full_cycle_minutes),
+    scheduled_interval_minutes: optionalNumber(source.scheduled_interval_minutes),
+    label: nullableString(source.label),
+  };
+}
+
+function emptyApplyHealthCycle() {
+  return {
+    basis: null,
+    apply_ready_count: null,
+    window_size: null,
+    estimated_full_cycle_windows: null,
+    estimated_full_cycle_minutes: null,
+    scheduled_interval_minutes: null,
+    label: null,
+  };
+}
+function latestIso(values) {
+  const timestamps = values
+    .map((value) => Date.parse(value || ""))
+    .filter((value) => Number.isFinite(value));
+  if (!timestamps.length) return null;
+  return new Date(Math.max(...timestamps)).toISOString();
+}
+
+function numericRecord(value) {
+  const record = objectValue(value);
+  return Object.fromEntries(
+    Object.entries(record)
+      .map(([key, count]) => ({ key, count: numberOrNull(count) }))
+      .filter((entry) => entry.count !== null && entry.count > 0)
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((entry) => [entry.key, entry.count]),
+  );
+}
+
+async function readClusterRepairMarker(
+  env,
+  targetRepo,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const stateRepo = String(env.CLAWSWEEPER_STATE_REPO || CLAWSWEEPER_STATE_REPO);
   const stateRef = String(env.CLAWSWEEPER_STATE_REF || CLAWSWEEPER_STATE_REF);
   const repoSlug = String(targetRepo || "").replace(/\//g, "-");
   const markerPath = `results/cluster-repair-intake/${repoSlug}.json`;
   try {
-    const content = await githubJson(
-      env,
+    const content = await github(
       `/repos/${stateRepo}/contents/${githubPath(markerPath)}?ref=${encodeURIComponent(stateRef)}`,
     );
     const marker = JSON.parse(decodeGithubContent(content?.content));
@@ -3458,7 +3934,11 @@ function decodeGithubContent(value) {
   return new TextDecoder().decode(bytes);
 }
 
-async function recentClawsweeperClosed(env, repos) {
+async function recentClawsweeperClosed(
+  env,
+  repos,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const trustedBotLogins = clawsweeperBotLogins(env);
   const cacheKey = [
     "recent-closed",
@@ -3470,7 +3950,7 @@ async function recentClawsweeperClosed(env, repos) {
 
   const since = new Date(Date.now() - CLOSED_STATS_HOURS * 60 * 60 * 1000).toISOString();
   const rows = await Promise.all(
-    repos.map((repo) => recentClawsweeperClosedForRepo(env, repo, since, trustedBotLogins)),
+    repos.map((repo) => recentClawsweeperClosedForRepo(env, repo, since, trustedBotLogins, github)),
   );
   const items = rows
     .flat()
@@ -3488,14 +3968,20 @@ async function recentClawsweeperClosed(env, repos) {
   return result;
 }
 
-async function recentClawsweeperClosedForRepo(env, repo, since, trustedBotLogins) {
+async function recentClawsweeperClosedForRepo(
+  env,
+  repo,
+  since,
+  trustedBotLogins,
+  github: GithubJsonReader = (path) => githubJson(env, path),
+) {
   const items = [];
-  const firstPage = await githubJson(env, closedIssuesPath(repo, since, 1)).catch(() => []);
+  const firstPage = await github(closedIssuesPath(repo, since, 1)).catch(() => []);
   const pages = [Array.isArray(firstPage) ? firstPage : []];
   if (pages[0].length >= 100 && CLOSED_STATS_PAGE_LIMIT > 1) {
     const remainingPages = await Promise.all(
       Array.from({ length: CLOSED_STATS_PAGE_LIMIT - 1 }, (_, index) =>
-        githubJson(env, closedIssuesPath(repo, since, index + 2)).catch(() => []),
+        github(closedIssuesPath(repo, since, index + 2)).catch(() => []),
       ),
     );
     pages.push(...remainingPages.map((issues) => (Array.isArray(issues) ? issues : [])));
@@ -3883,12 +4369,20 @@ function emptyClosedStats(generatedAt) {
 
 function firstAutomergeCommandAt(comments) {
   if (!Array.isArray(comments)) return null;
-  const command = comments.find((comment) =>
-    /@clawsweeper\s+auto\s*-?\s*merge|@clawsweeper\s+automerge|\/clawsweeper\s+auto\s*-?\s*merge|\/clawsweeper\s+automerge/i.test(
-      String(comment.body || ""),
-    ),
-  );
+  const command = comments
+    .slice()
+    .sort((left, right) => automergeCommentTime(left) - automergeCommentTime(right))
+    .find((comment) =>
+      /@clawsweeper\s+auto\s*-?\s*merge|@clawsweeper\s+automerge|\/clawsweeper\s+auto\s*-?\s*merge|\/clawsweeper\s+automerge/i.test(
+        String(comment.body || ""),
+      ),
+    );
   return command?.created_at || null;
+}
+
+function automergeCommentTime(comment) {
+  const timestamp = Date.parse(String(comment?.created_at || ""));
+  return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
 }
 
 async function readCachedSnapshot(env, ttlSeconds) {
@@ -4028,6 +4522,19 @@ function storeCacheRequest(key) {
   return new Request(`https://clawsweeper.internal/store/${encodeURIComponent(key)}`, {
     method: "GET",
   });
+}
+
+function createGithubJsonCache(env): GithubJsonReader {
+  const cache = new Map<string, ReturnType<typeof githubJson>>();
+  return (path: string) => {
+    const key = String(path);
+    let request = cache.get(key);
+    if (!request) {
+      request = githubJson(env, key);
+      cache.set(key, request);
+    }
+    return request;
+  };
 }
 
 async function githubJson(env, path) {
@@ -4422,6 +4929,11 @@ function nullableString(value) {
 function numberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  return numberOrNull(value);
 }
 
 function numberFrom(value, fallback) {
@@ -5569,6 +6081,63 @@ h2 {
 .status-dot.waiting { background: var(--amber); }
 .status-dot.done { background: var(--green); }
 .status-dot.failed { background: var(--red); }
+.apply-health-alert {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(243,183,89,0.5);
+  border-left: 3px solid var(--amber);
+  border-radius: 8px;
+  background: rgba(243,183,89,0.08);
+}
+.apply-health-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.apply-health-heading strong { color: #ffe0a8; }
+.apply-health-alert p { margin: 0; color: var(--muted); }
+.apply-health-next strong { color: var(--text); }
+.apply-health-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.apply-health-meta .pill {
+  min-height: 22px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.apply-health-reason {
+  cursor: help;
+  border-color: rgba(243,183,89,0.35);
+}
+.apply-health-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+.apply-health-command {
+  min-width: 0;
+  padding: 5px 8px;
+  color: #dce7f5;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  background: rgba(6,10,15,0.45);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  line-height: 1.45;
+}
+.apply-health-copy {
+  min-height: 27px;
+}
+@media (max-width: 740px) {
+  .apply-health-action { grid-template-columns: 1fr; }
+}
 .automatic-head { margin-top: 24px; }
 .automatic-grid {
   display: grid;
@@ -6076,6 +6645,7 @@ a:hover { color: #89c8ff; text-decoration: underline; }
       <span><i class="waiting"></i>waiting</span>
       <span><i></i>available</span>
     </div>
+    <div id="apply-health"></div>
     <div class="automatic-head">
       <h2>Automatic Builds</h2>
       <span class="muted" id="automatic-summary"></span>
@@ -6448,6 +7018,7 @@ function renderDashboard(data, note) {
     metric("🎯 Capacity", fleet.budget_used_percent + "%", "fleet utilization", fleet.budget_used_percent, "var(--green)")
   ].join("");
   renderSystemMap(data);
+  renderApplyHealth(data);
   renderAutomaticWork(data.automatic_work || []);
   renderWorkers(data.workers || []);
   openWorkerFromHash();
@@ -6459,6 +7030,304 @@ function renderDashboard(data, note) {
   renderWorkerHealth(data.health);
   renderOperations(data.recent.operation_counts);
   renderEvents(data.recent.events || []);
+}
+function renderApplyHealth(data) {
+  const target = document.getElementById("apply-health");
+  if (!target) return;
+  const items = (data.recent?.apply_health?.items || []).filter(item => applyHealthNeedsAttention(item.status));
+  if (!items.length) {
+    target.innerHTML = "";
+    return;
+  }
+  target.innerHTML = items.map(item => {
+    const topReason = applyHealthPrimaryReason(item);
+    const topInfo = applyHealthReasonInfo(topReason, item);
+    const action = applyHealthRecommendedAction(item, topReason);
+    const reasons = applyHealthReasonEntries(item)
+      .slice(0, 4)
+      .map(([reason, count]) => applyHealthReasonPill(reason, count, item))
+      .join("");
+    const showCursor = item.cursor_required || Boolean(item.cursor?.next_after_number);
+    const buckets = applyHealthNextActionBucketPills(item);
+    const cursor = item.cursor?.next_after_number ? "cursor #" + item.cursor.next_after_number : "cursor missing";
+    const cursorTitle = item.cursor?.next_after_number
+      ? "Rotation cursor was recorded; the next pruning run should continue after this item."
+      : "No rotation cursor was recorded. If this was a full scan window, the next pruning run can repeat the same records.";
+    const cursorPill = showCursor
+      ? '<span class="pill" title="' + esc(cursorTitle) + '">' + esc(cursor) + '</span>'
+      : "";
+    const processed = Number.isFinite(item.processed) ? fmt.format(item.processed) : "unknown";
+    const closed = Number.isFinite(item.closed) ? fmt.format(item.closed) : "unknown";
+    const synced = Number.isFinite(item.comment_synced) ? fmt.format(item.comment_synced) : "unknown";
+    const closureProcessed = Number.isFinite(item.lanes?.closure?.processed) ? fmt.format(item.lanes.closure.processed) : processed;
+    const syncProcessed = Number.isFinite(item.lanes?.comment_sync?.processed) ? fmt.format(item.lanes.comment_sync.processed) : processed;
+    const closureSynced = Number.isFinite(item.lanes?.closure?.comment_synced) ? fmt.format(item.lanes.closure.comment_synced) : "0";
+    const syncLaneSynced = Number.isFinite(item.lanes?.comment_sync?.comment_synced) ? fmt.format(item.lanes.comment_sync.comment_synced) : "0";
+    const cycle = applyHealthCyclePill(item.cycle);
+    return '<div class="apply-health-alert" role="status" title="' + esc(topInfo.summary + " Next: " + topInfo.action) + '">' +
+      '<div class="apply-health-heading"><strong>Pruning sweep ' + esc(applyHealthStatusLabel(item.status)) + " - " + esc(item.target_repo || "target repo") + '</strong><span class="pill" title="' + esc("Latest " + applyHealthModeLabel(item.mode) + " status from the sweep-status marker.") + '">' + esc(applyHealthModeLabel(item.mode)) + '</span></div>' +
+      '<p>' + esc(applyHealthOperatorSummary(item, topInfo)) + '</p>' +
+      '<p class="apply-health-next"><strong>Next check:</strong> ' + esc(topInfo.action) + '</p>' +
+      applyHealthActionHtml(action) +
+      '<div class="apply-health-meta"><span class="pill" title="Records checked in this pruning window.">' + esc(processed) + ' processed</span><span class="pill" title="' + esc("Closure lane: " + closureProcessed + " records processed; " + closed + " closed.") + '">' + esc(closed) + ' closed</span><span class="pill" title="' + esc("Durable review comments refreshed across lanes: " + synced + ". Closure lane refreshed " + closureSynced + "; comment-sync lane refreshed " + syncLaneSynced + " from " + syncProcessed + " records.") + '">' + esc(synced) + ' comments synced</span>' + cycle + cursorPill + reasons + buckets + linkClass(item.run_url, "workflow run", "pill run-link") + '</div></div>';
+  }).join("");
+}
+function applyHealthCyclePill(cycle) {
+  if (!cycle || cycle.basis !== "scheduled_close_cursor") return "";
+  const windows = Number(cycle.estimated_full_cycle_windows);
+  const label = Number.isFinite(windows)
+    ? "revisit ~" + fmt.format(windows) + " window" + (windows === 1 ? "" : "s")
+    : "revisit estimate";
+  return '<span class="pill" title="' + esc(cycle.label || "Estimated time to revisit the current apply-ready close queue.") + '">' + esc(label) + '</span>';
+}
+function applyHealthNeedsAttention(status) {
+  return ["attention", "blocked", "degraded", "failed", "needs_attention", "warning"].includes(String(status || "").toLowerCase());
+}
+function applyHealthStatusLabel(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "failed") return "failed";
+  if (value === "degraded" || value === "warning" || value === "attention") return "degraded";
+  return "blocked";
+}
+function applyHealthModeLabel(mode) {
+  const value = String(mode || "").toLowerCase();
+  if (value === "comment_sync") return "comment-sync lane";
+  if (value === "close") return "close lane";
+  return "pruning lane";
+}
+function applyHealthReasonEntries(item) {
+  const entries = [];
+  const seen = new Set();
+  const skipReasons = item.skip_reasons || {};
+  for (const reason of item.attention_reasons || []) {
+    if (!reason || seen.has(reason)) continue;
+    seen.add(reason);
+    const skipCount = skipReasons[reason];
+    entries.push([reason, Number.isFinite(skipCount) ? skipCount : null]);
+  }
+  for (const entry of Object.entries(skipReasons).sort((left, right) => Number(right[1]) - Number(left[1]))) {
+    if (seen.has(entry[0])) continue;
+    seen.add(entry[0]);
+    entries.push(entry);
+  }
+  return entries;
+}
+function applyHealthPrimaryReason(item) {
+  return applyHealthReasonEntries(item)[0]?.[0] || item.status || "";
+}
+function applyHealthReasonPill(reason, count, item) {
+  const info = applyHealthReasonInfo(reason, item);
+  const countText = Number.isFinite(count) ? " " + fmt.format(count) : "";
+  return '<span class="pill apply-health-reason" title="' + esc(info.summary + " Next: " + info.action) + '">' + esc(info.label + countText) + '</span>';
+}
+function applyHealthNextActionForReason(item, reason) {
+  return (item.next_actions || []).find(action => action.reason === reason) || null;
+}
+function applyHealthNextActionBucketPills(item) {
+  const buckets = item.next_action_buckets || {};
+  const entries = Object.entries(buckets)
+    .filter(([, count]) => Number.isFinite(count) && count > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]));
+  if (entries.length < 2) return "";
+  const total = entries.reduce((sum, [, count]) => sum + Number(count), 0);
+  const summary = entries
+    .slice(0, 4)
+    .map(([bucket, count]) => applyHealthBucketLabel(bucket) + " " + fmt.format(Number(count)))
+    .join("; ");
+  return '<span class="pill apply-health-reason" title="' + esc("Follow-up buckets: " + summary) + '">' + esc("follow-ups " + fmt.format(total)) + '</span>';
+}
+function applyHealthBucketLabel(bucket) {
+  const labels = {
+    already_resolved: "already resolved",
+    close_coverage_proof: "needs close proof",
+    conversation_unlock: "unlock conversation",
+    defer_until_closing_pr: "defer for PR state",
+    inspect: "inspect skips",
+    live_state_recovery: "live check recovery",
+    maintainer_review: "maintainer decision",
+    report_quality_repair: "repair review report",
+    review_refresh: "refresh reviews",
+    run_budget: "runtime budget",
+    stable_skip: "stable skips",
+  };
+  return labels[bucket] || applyHealthReasonLabel(bucket);
+}
+function applyHealthActionHtml(action) {
+  if (!action) return "";
+  const command = action.command || "";
+  const commandHtml = command
+    ? '<code class="apply-health-command" title="' + esc(command) + '">' + esc(command) + '</code><button class="filter-button apply-health-copy" type="button" data-copy-command="' + esc(command) + '" title="Copy this maintainer command">Copy command</button>'
+    : '<span class="apply-health-command" title="' + esc(action.detail || "") + '">' + esc(action.detail || "No safe automatic action is available from the dashboard.") + '</span>';
+  return '<div class="apply-health-action" title="' + esc(action.title || "") + '">' + commandHtml + linkClass(action.url, action.linkLabel || "open workflow", "pill run-link") + '</div>';
+}
+function applyHealthRecommendedAction(item, reason) {
+  const targetRepo = String(item.target_repo || "openclaw/openclaw");
+  const mode = String(item.mode || "").toLowerCase();
+  const workflowUrl = "https://github.com/openclaw/clawsweeper/actions/workflows/sweep.yml";
+  const nextAction = applyHealthNextActionForReason(item, reason);
+  if (reason === "cursor_required_but_missing_after_full_window") {
+    return {
+      title: "Maintainer action: inspect the current run before rerunning, because a missing cursor can make the next run repeat the same window.",
+      detail: "Inspect the cursor-write and state-publish steps; rerun only after the cursor write failure is understood.",
+      url: item.run_url || workflowUrl,
+      linkLabel: item.run_url ? "open run" : "open workflow",
+    };
+  }
+  if (reason === "skipped_changed_since_review") {
+    return {
+      title: "Maintainer action: " + (nextAction?.next_step || "refresh review records before trying to close changed items."),
+      command: "gh workflow run sweep.yml --repo openclaw/clawsweeper -f target_repo=" + targetRepo + " -f apply_existing=false",
+      url: workflowUrl,
+      linkLabel: "open workflow",
+    };
+  }
+  if (reason === "skipped_pr_close_coverage_proof") {
+    return {
+      title: "Maintainer action: " + (nextAction?.next_step || "add close-coverage proof before retrying PR pruning."),
+      detail: nextAction?.next_step || "Add or refresh close-coverage proof, then rerun the close lane.",
+      url: item.run_url || workflowUrl,
+      linkLabel: item.run_url ? "open run" : "open workflow",
+    };
+  }
+  if (nextAction && !nextAction.retryable) {
+    return {
+      title: "Maintainer action: " + (nextAction.next_step || "inspect this stable or policy-gated skip before rerunning."),
+      detail: nextAction.next_step || "No automatic rerun is recommended for this skip bucket.",
+      url: item.run_url || workflowUrl,
+      linkLabel: item.run_url ? "open run" : "open workflow",
+    };
+  }
+  if (nextAction && nextAction.bucket === "report_quality_repair") {
+    return {
+      title: "Maintainer action: " + (nextAction.next_step || "repair or refresh the review report."),
+      detail: nextAction.next_step || "Queue report-quality repair or re-review before retrying apply.",
+      url: item.run_url || workflowUrl,
+      linkLabel: item.run_url ? "open run" : "open workflow",
+    };
+  }
+  if (nextAction) {
+    return {
+      title: "Maintainer action: " + (nextAction.next_step || "inspect this follow-up before rerunning."),
+      detail: nextAction.next_step || "Inspect this follow-up bucket before retrying apply.",
+      url: item.run_url || workflowUrl,
+      linkLabel: item.run_url ? "open run" : "open workflow",
+    };
+  }
+  if (mode === "comment_sync") {
+    return {
+      title: "Maintainer action: run the next comment-sync cursor window. GitHub permissions control who can run it.",
+      command: "gh workflow run sweep.yml --repo openclaw/clawsweeper -f target_repo=" + targetRepo + " -f apply_existing=true -f apply_sync_comments_only=true -f apply_item_numbers=__cursor__ -f apply_limit=25",
+      url: workflowUrl,
+      linkLabel: "open workflow",
+    };
+  }
+  const closeLimit = Number.isFinite(item.close_limit) && item.close_limit > 0 ? item.close_limit : 5;
+  return {
+    title: "Maintainer action: rerun the bounded close lane. GitHub permissions control who can run it.",
+    command: "gh workflow run sweep.yml --repo openclaw/clawsweeper -f target_repo=" + targetRepo + " -f apply_existing=true -f apply_limit=" + closeLimit + " -f apply_kind=all -f apply_close_reasons=all",
+    url: workflowUrl,
+    linkLabel: "open workflow",
+  };
+}
+function applyHealthReasonInfo(reason, item) {
+  const nextAction = item ? applyHealthNextActionForReason(item, reason) : null;
+  if (nextAction?.label || nextAction?.summary || nextAction?.next_step) {
+    return {
+      label: nextAction.label || applyHealthReasonLabel(reason),
+      summary: nextAction.summary || "ClawSweeper classified this skip bucket with a deterministic follow-up.",
+      action: nextAction.next_step || "Inspect this follow-up bucket before rerunning.",
+    };
+  }
+  const value = String(reason || "");
+  if (value === "cursor_required_but_missing_after_full_window") {
+    return {
+      label: "Rotation cursor missing",
+      summary: "The pruning sweep processed the full bounded window but did not publish the next cursor.",
+      action: "Open the workflow run and check the cursor-write step; until the cursor is written, the next run can repeat this window.",
+    };
+  }
+  if (value === "skipped_runtime_budget") {
+    return {
+      label: "Runtime budget hit",
+      summary: "The workflow stopped processing because it reached its bounded runtime.",
+      action: "Let the next scheduled sweep continue; if this repeats, reduce the batch size or raise the apply runtime budget.",
+    };
+  }
+  if (value === "skipped_live_fetch_failed") {
+    return {
+      label: "GitHub live check failed",
+      summary: "ClawSweeper could not confirm live GitHub state before mutating an item.",
+      action: "Inspect the workflow run for GitHub API, auth, or rate-limit failures, then rerun after live checks recover.",
+    };
+  }
+  if (value === "skipped_changed_since_review") {
+    return {
+      label: "Changed since review",
+      summary: "The item changed after the ClawSweeper review that proposed the close.",
+      action: "Refresh the ClawSweeper review for those items before closing; this skip is a safety guard.",
+    };
+  }
+  if (value === "skipped_pr_close_coverage_proof") {
+    return {
+      label: "PR close proof needed",
+      summary: "The PR needs coverage proof before ClawSweeper can close it as duplicate or superseded.",
+      action: "Add or refresh close-coverage proof, then rerun the sweep.",
+    };
+  }
+  if (value === "skipped_open_closing_pr") {
+    return {
+      label: "Closing PR still open",
+      summary: "The issue appears covered by an open pull request, so ClawSweeper avoided closing it early.",
+      action: "Review or land the linked closing PR before expecting the issue to close.",
+    };
+  }
+  if (value === "skipped_maintainer_authored") {
+    return {
+      label: "Maintainer-authored item",
+      summary: "Automation will not close this maintainer-authored item without human review.",
+      action: "Have a maintainer decide whether to close it manually or update the review policy.",
+    };
+  }
+  if (value === "skipped_policy_exempt" || value === "skipped_protected_label") {
+    return {
+      label: "Policy-protected item",
+      summary: "A label or policy exemption blocked automated pruning.",
+      action: "Check the policy or label before taking manual action.",
+    };
+  }
+  if (value === "skipped_not_open" || value === "skipped_already_closed" || value === "skipped_closed") {
+    return {
+      label: "Already closed",
+      summary: "The item was no longer open by the time ClawSweeper checked it.",
+      action: "No action is usually needed; investigate only if already-closed records dominate repeated runs.",
+    };
+  }
+  return {
+    label: applyHealthReasonLabel(value || "blocked_condition"),
+    summary: "ClawSweeper reported this skip bucket while checking whether it could safely prune an item.",
+    action: "Open the workflow run and inspect this skip bucket before rerunning or changing limits.",
+  };
+}
+function applyHealthReasonLabel(reason) {
+  return String(reason || "")
+    .replace(/^skipped_/, "")
+    .replace(/_/g, " ")
+    .replace(/\\b\\w/g, letter => letter.toUpperCase());
+}
+function applyHealthOperatorSummary(item, reasonInfo) {
+  const processed = applyHealthCount(item.processed, "record", "records");
+  const skipped = Number.isFinite(item.skipped) ? "; " + applyHealthCount(item.skipped, "record", "records") + " skipped" : "";
+  const closed = Number.isFinite(item.closed) ? item.closed : 0;
+  const synced = Number.isFinite(item.comment_synced) ? item.comment_synced : 0;
+  const useful = closed + synced;
+  const result = useful > 0
+    ? "ClawSweeper processed " + processed + " and completed " + applyHealthCount(useful, "close/comment update", "close/comment updates")
+    : "ClawSweeper processed " + processed + " without closing or syncing anything";
+  return result + skipped + ". Main signal: " + reasonInfo.label + ".";
+}
+function applyHealthCount(value, singular, plural) {
+  if (!Number.isFinite(value)) return "unknown " + plural;
+  return fmt.format(value) + " " + (value === 1 ? singular : plural);
 }
 function renderPipeline(rows) {
   if (!rows.length) {
@@ -6552,6 +7421,21 @@ document.getElementById("automatic-work").addEventListener("click", event => {
   if (!button) return;
   const row = automaticIndex.get(String(button.dataset.automaticId));
   if (row) renderAutomaticDialog(row);
+});
+document.addEventListener("click", event => {
+  const button = event.target.closest("button[data-copy-command]");
+  if (!button) return;
+  const command = String(button.dataset.copyCommand || "");
+  if (!command) return;
+  const copied = navigator.clipboard?.writeText(command);
+  if (!copied) return;
+  copied.then(() => {
+    const original = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(() => {
+      button.textContent = original || "Copy command";
+    }, 1500);
+  }).catch(() => undefined);
 });
 document.getElementById("worker-dialog-close").addEventListener("click", closeWorkerDialog);
 document.getElementById("worker-dialog").addEventListener("click", event => {

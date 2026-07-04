@@ -15,6 +15,7 @@
     "triagePriority",
     "impactLabels",
     "mergeRiskLabels",
+    "maturityLabels",
     "mergeRiskOptions",
     "reviewMetrics",
     "labelJustifications",
@@ -69,6 +70,8 @@
         "clawhub",
         "duplicate_or_superseded",
         "low_signal_unmergeable_pr",
+        "stalled_unproven_pr",
+        "abandoned_pr",
         "unconfirmed_product_direction",
         "not_actionable_in_repo",
         "incoherent",
@@ -186,10 +189,12 @@
           "impact:message-loss",
           "impact:session-state",
           "impact:auth-provider",
+          "impact:ux-release-blocker",
+          "impact:ux-friction",
           "impact:other"
         ]
       },
-      "description": "ClawSweeper-owned GitHub impact labels for maintainers to find the affected problem class on issues. Use [] for pull requests and when no meaningful owned impact signal applies. These describe what the issue is about, not PR merge risk. Use at most 3; impact:other counts toward this max and means meaningful maintainer-visible impact exists but no specific owned impact label fits. Prefer a specific impact label over impact:other. impact:data-loss: This issue is about lost, corrupted, or silently dropped user/session/config data. impact:security: This issue is about security boundaries, credentials, authz, sandboxing, or sensitive data. impact:crash-loop: This issue is about crashes, hangs, restart loops, or process-level availability. impact:message-loss: This issue is about lost, duplicated, misrouted, or suppressed channel messages. impact:session-state: This issue is about session, memory, transcript, context, or agent state drift. impact:auth-provider: This issue is about auth, provider routing, model choice, or SecretRef resolution. impact:other: This issue has meaningful maintainer-visible impact outside the owned taxonomy."
+      "description": "ClawSweeper-owned GitHub impact labels for maintainers to find the affected problem class on issues. Use [] for pull requests and when no meaningful owned impact signal applies. These describe what the issue is about, not PR merge risk. Use at most 3; impact:other counts toward this max and means meaningful maintainer-visible impact exists but no specific owned impact label fits. Prefer a specific impact label over impact:other, and prefer impact:ux-release-blocker over impact:ux-friction when the same evidence supports both. UX override: a non-technical first-time or community user blocked in website/download/install/update/setup/onboarding/auth/provider setup/first useful run/in-product recovery with no in-product path forward requires P0 plus impact:ux-release-blocker. The same applies when completing or recovering that blocked path requires terminal commands, config edits, log inspection, manual file edits, internal knowledge, or maintainer/support intervention. Recoverable docs/support/guessing paths use P1/P2 plus impact:ux-friction. Do not promote ordinary advanced configuration or optional power-user workflows solely because they use a terminal or config file. Technical recovery from a blocker should recommend a Doctor button, Fix button, setup wizard, inline recovery, or visible command launcher in bestSolution/workReason. impact:data-loss: This issue is about lost, corrupted, or silently dropped user/session/config data. impact:security: This issue is about security boundaries, credentials, authz, sandboxing, or sensitive data. impact:crash-loop: This issue is about crashes, hangs, restart loops, or process-level availability. impact:message-loss: This issue is about lost, duplicated, misrouted, or suppressed channel messages. impact:session-state: This issue is about session, memory, transcript, context, or agent state drift. impact:auth-provider: This issue is about auth, provider routing, model choice, or SecretRef resolution. impact:ux-release-blocker: A non-technical user is blocked without terminal, logs, config, or support. impact:ux-friction: User-facing flow adds avoidable confusion or support burden without fully blocking progress. impact:other: This issue has meaningful maintainer-visible impact outside the owned taxonomy."
     },
     "mergeRiskLabels": {
       "type": "array",
@@ -208,6 +213,15 @@
         ]
       },
       "description": "PR-only ClawSweeper-owned GitHub labels for merge risks that green CI does not settle. These describe what could go wrong specifically because this PR is merged, not the affected or solved problem class. Use at most 3 for pull requests and [] for issues and when no meaningful owned merge-risk signal applies. Do not use merge-risk: 🚨 automation only because CI is red, pending, flaky, or absent; use it only when the PR diff changes automation behavior or plausibly causes CI, automerge, proof capture, label sync, or related automation to fail after merge. merge-risk: 🚨 other counts toward this max and means meaningful merge risk exists but no specific owned merge-risk label fits. Prefer a specific merge-risk label over merge-risk: 🚨 other. merge-risk: 🚨 compatibility: 🚨 Merging this PR could break existing users, config, migrations, defaults, or upgrades. merge-risk: 🚨 message-delivery: 🚨 Merging this PR could drop, duplicate, misroute, suppress, or wrongly target messages. merge-risk: 🚨 session-state: 🚨 Merging this PR could lose, corrupt, stale, or mis-associate session or agent state. merge-risk: 🚨 auth-provider: 🚨 Merging this PR could break OAuth, tokens, provider routing, model choice, or credentials. merge-risk: 🚨 security-boundary: 🚨 Merging this PR could weaken sandboxing, authorization, credentials, or sensitive data. merge-risk: 🚨 availability: 🚨 Merging this PR could cause crashes, hangs, restart loops, stalls, or process outages. merge-risk: 🚨 automation: 🚨 Merging this PR could break CI, automerge, proof capture, label sync, or automation. merge-risk: 🚨 other: 🚨 Merging this PR has meaningful risk outside the owned taxonomy."
+    },
+    "maturityLabels": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["maturity:stable"]
+      },
+      "description": "Issue-only labels for mature taxonomy matches. Use [] for PRs. Select maturity:stable only when an active matched feature is currently M4/M5 in qa/maturity-scores.yaml."
     },
     "mergeRiskOptions": {
       "type": "array",
@@ -284,7 +298,10 @@
               "impact:message-loss",
               "impact:session-state",
               "impact:auth-provider",
+              "impact:ux-release-blocker",
+              "impact:ux-friction",
               "impact:other",
+              "maturity:stable",
               "merge-risk: 🚨 compatibility",
               "merge-risk: 🚨 message-delivery",
               "merge-risk: 🚨 session-state",
@@ -301,7 +318,7 @@
           }
         }
       },
-      "description": "One justification for every selected ClawSweeper-managed triage, impact, and merge-risk label. Include the selected triagePriority unless it is none, every selected impactLabels entry, and every selected mergeRiskLabels entry. Do not include labels that were not selected."
+      "description": "One justification for every selected ClawSweeper-managed triage, impact, maturity, and merge-risk label. Include the selected triagePriority unless it is none, every selected impactLabels entry, every selected maturityLabels entry, and every selected mergeRiskLabels entry. Do not include labels that were not selected."
     },
     "itemCategory": {
       "type": "string",
@@ -492,7 +509,8 @@
           "confidenceScore",
           "file",
           "lineStart",
-          "lineEnd"
+          "lineEnd",
+          "lateFinding"
         ],
         "properties": {
           "title": {
@@ -524,6 +542,10 @@
           "lineEnd": {
             "type": "integer",
             "minimum": 1
+          },
+          "lateFinding": {
+            "type": "boolean",
+            "description": "True when this finding targets code unchanged since an earlier reviewed head where the concern was equally visible but was not raised. Use false for findings introduced by new commits or newly available evidence."
           }
         }
       }

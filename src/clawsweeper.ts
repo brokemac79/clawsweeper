@@ -50,7 +50,26 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
-import { runText } from "./command.js";
+import {
+  appendFloorBackfillCandidates,
+  compareDueCandidates,
+  compareHotIntakeDueCandidates,
+  hasReviewPolicyMismatch,
+  nextReviewDueAtMs,
+  reviewedAtMs,
+  reviewPriority,
+  schedulerBucket,
+  selectDueCandidates,
+  shouldReviewItem,
+  shouldStopSaturatedPlanScan,
+  type SchedulerDueCandidate,
+} from "./scheduler-policy.js";
+import {
+  isUserFacingCommandError,
+  resolveCommand,
+  runText,
+  UserFacingCommandError,
+} from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
   buildOpenClawPrSurfaceStats,
@@ -79,6 +98,15 @@ import {
   type Args,
 } from "./clawsweeper-args.js";
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
+import {
+  appendReviewHistoryCycle,
+  neutralizeReviewControlMarkers,
+  parseReviewHistory,
+  renderReviewHistorySection,
+  reviewHistoryCycleFromCommentBody,
+  type ReviewHistoryCycle,
+  type ReviewHistoryLedger,
+} from "./review-history.js";
 
 export {
   codexEnv,
@@ -91,12 +119,12 @@ export { itemNumbersArg } from "./clawsweeper-args.js";
 export { safeOutputTail } from "./clawsweeper-text.js";
 export {
   ghRetryKind,
+  ghRetryWaitMs,
   isGitHubNotFoundError,
   isGitHubRequiresAuthenticationError,
   isLockedConversationCommentError,
   shouldRetryGh,
 } from "./github-retry.js";
-
 type ItemKind = "issue" | "pull_request";
 type ApplyKind = ItemKind | "all";
 type DecisionKind = "close" | "keep_open";
@@ -125,6 +153,8 @@ type ImpactLabelName =
   | "impact:message-loss"
   | "impact:session-state"
   | "impact:auth-provider"
+  | "impact:ux-release-blocker"
+  | "impact:ux-friction"
   | "impact:other";
 type MergeRiskLabelName =
   | "merge-risk: 🚨 compatibility"
@@ -135,8 +165,13 @@ type MergeRiskLabelName =
   | "merge-risk: 🚨 availability"
   | "merge-risk: 🚨 automation"
   | "merge-risk: 🚨 other";
+type MaturityLabelName = "maturity:stable";
 type MergeRiskOptionCategory = "fix_before_merge" | "accept_risk" | "pause_or_close";
-type ReviewLabelName = Exclude<TriagePriority, "none"> | ImpactLabelName | MergeRiskLabelName;
+type ReviewLabelName =
+  | Exclude<TriagePriority, "none">
+  | ImpactLabelName
+  | MergeRiskLabelName
+  | MaturityLabelName;
 type ItemCategory =
   | "bug"
   | "regression"
@@ -220,6 +255,8 @@ type CloseReason =
   | "clawhub"
   | "duplicate_or_superseded"
   | "low_signal_unmergeable_pr"
+  | "stalled_unproven_pr"
+  | "abandoned_pr"
   | "unconfirmed_product_direction"
   | "not_actionable_in_repo"
   | "incoherent"
@@ -234,6 +271,7 @@ type ActionTaken =
   | "skipped_comment_auth"
   | "skipped_locked_conversation"
   | "skipped_changed_since_review"
+  | "skipped_stale_review_comment_sync"
   | "skipped_open_closing_pr"
   | "skipped_same_author_pair"
   | "skipped_already_closed"
@@ -341,6 +379,7 @@ interface ReviewFinding {
   file: string;
   lineStart: number;
   lineEnd: number;
+  lateFinding?: boolean;
 }
 
 interface SecurityConcern {
@@ -444,6 +483,7 @@ interface ReviewCommentRenderOptions {
   prStatusKind?: PrStatusLabelKind | null;
   previousLabels?: readonly string[];
   hasOpenLinkedPullRequest?: boolean;
+  previousReviewCommentBody?: string;
 }
 
 interface Decision {
@@ -459,6 +499,7 @@ interface Decision {
   triagePriority: TriagePriority;
   impactLabels: ImpactLabelName[];
   mergeRiskLabels: MergeRiskLabelName[];
+  maturityLabels: MaturityLabelName[];
   mergeRiskOptions: MergeRiskOption[];
   reviewMetrics: ReviewMetric[];
   labelJustifications: LabelJustification[];
@@ -514,6 +555,7 @@ interface ItemContext {
   issue: unknown;
   comments: unknown[];
   timeline: unknown[];
+  sourceRevision?: string;
   previousClawSweeperReview?: unknown;
   closingPullRequests?: unknown[];
   referencingMergedPullRequests?: unknown[];
@@ -745,6 +787,7 @@ interface WorkflowStatusSummary {
   state: string;
   detail: string;
   runUrl: string | undefined;
+  applyHealth: Record<string, unknown> | undefined;
   plannedCount: number | undefined;
   plannedCapacity: number | undefined;
   plannedShards: number | undefined;
@@ -789,22 +832,7 @@ const DEFAULT_PLAN_BATCH_SIZE = 3;
 const DEFAULT_PLAN_SHARD_COUNT = AUTOMATION_LIMITS.review_shards.normal_default;
 const MAX_PLAN_SHARD_COUNT = AUTOMATION_LIMITS.review_shards.hard_cap;
 
-type SchedulerBucket =
-  | "hot_issue"
-  | "hot_pull_request"
-  | "activity"
-  | "daily_pull_request"
-  | "recent_issue"
-  | "weekly_issue";
-
-interface DueCandidate {
-  item: Item;
-  review: ExistingReview | null;
-  priority: number;
-  reviewedAt: number;
-  nextDueAt: number;
-  bucket: SchedulerBucket;
-}
+type DueCandidate = SchedulerDueCandidate<Item, ExistingReview>;
 
 interface ApplyResult {
   repo?: string;
@@ -884,6 +912,12 @@ interface ProofLaneCandidate {
   number: number;
   likely: boolean;
   reviewedAt?: string | undefined;
+  sortAt: number;
+}
+
+interface ProofLaneCursor {
+  likely: boolean;
+  number: number;
   sortAt: number;
 }
 
@@ -1061,13 +1095,16 @@ let activeRepositoryProfile = repositoryProfileFor(
 const FRESH_DAYS = 7;
 const HOT_REVIEW_DAYS = 7;
 const RECENT_ISSUE_DAYS = 30;
-const HOURLY_REVIEW_MS = 60 * 60 * 1000;
 const DEFAULT_BACKFILL_REVIEW_AGE_MINUTES = 360;
 const DAILY_REVIEW_DAYS = 1;
 const WEEKLY_REVIEW_DAYS = 7;
 const STALE_INSUFFICIENT_INFO_MIN_AGE_DAYS = 60;
 const UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS = 14;
 const UNCONFIRMED_PRODUCT_DIRECTION_MIN_INACTIVE_DAYS = 7;
+const STALLED_UNPROVEN_PR_MIN_AGE_DAYS = 14;
+const STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS = 14;
+const ABANDONED_PR_MIN_AGE_DAYS = 30;
+const ABANDONED_PR_MIN_INACTIVE_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_MISSING_OPEN_MS = DAY_MS;
 const DEFAULT_CODEX_MODEL = PUBLIC_CODEX_MODEL;
@@ -1075,9 +1112,14 @@ const DEFAULT_REASONING_EFFORT = "high";
 const DEFAULT_SERVICE_TIER = "";
 const DEFAULT_REVIEW_CODEX_TIMEOUT_MS = 1_200_000;
 const DEFAULT_CODEX_FALLBACK_MIN_BUDGET_MS = 120_000;
-const REVIEW_POLICY_VERSION = "2026-06-15-policy-v22";
+const REVIEW_POLICY_VERSION = "2026-07-04-policy-v23";
 const REVIEW_ITEM_PROMPT_PATH = join(ROOT, "prompts", "review-item.md");
 const CLAWSWEEPER_DECISION_SCHEMA_PATH = join(ROOT, "schema", "clawsweeper-decision.schema.json");
+const MATURITY_STABLE_SHORTLIST_SCRIPT_PATH = join(
+  ROOT,
+  "scripts",
+  "maturity-stable-shortlist.mjs",
+);
 const PR_CLOSE_COVERAGE_PROOF_PROMPT_PATH = join(ROOT, "prompts", "pr-close-coverage-proof.md");
 const PR_CLOSE_COVERAGE_PROOF_SCHEMA_PATH = join(
   ROOT,
@@ -1090,12 +1132,13 @@ const AUTOMERGE_LABEL = "clawsweeper:automerge";
 const AUTOFIX_LABEL = "clawsweeper:autofix";
 const HUMAN_REVIEW_LABEL = "clawsweeper:human-review";
 const MANUAL_ONLY_LABEL = "clawsweeper:manual-only";
-const UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS = new Set([
+const PR_AUTO_CLOSE_EXEMPT_LABELS = new Set([
   HUMAN_REVIEW_LABEL,
   MANUAL_ONLY_LABEL,
   AUTOMERGE_LABEL,
   AUTOFIX_LABEL,
 ]);
+const WAITING_ON_AUTHOR_LABEL = "status: ⏳ waiting on author";
 const PROOF_OVERRIDE_LABEL = "proof: override";
 const PROOF_SUFFICIENT_LABEL = "proof: sufficient";
 const PROOF_NUDGE_MARKER_PREFIX = "<!-- clawsweeper-proof-nudge";
@@ -1304,6 +1347,17 @@ const IMPACT_LABELS = [
       "This issue is about auth, provider routing, model choice, or SecretRef resolution.",
   },
   {
+    name: "impact:ux-release-blocker",
+    color: "B60205",
+    description: "A non-technical user is blocked without terminal, logs, config, or support.",
+  },
+  {
+    name: "impact:ux-friction",
+    color: "FBCA04",
+    description:
+      "User-facing flow adds avoidable confusion or support burden without fully blocking progress.",
+  },
+  {
     name: "impact:other",
     color: "C5DEF5",
     description: "This issue has meaningful maintainer-visible impact outside the owned taxonomy.",
@@ -1369,6 +1423,20 @@ const MERGE_RISK_LABELS = [
 }[];
 const MERGE_RISK_LABEL_NAMES: ReadonlySet<string> = new Set(
   MERGE_RISK_LABELS.map((label) => label.name),
+);
+const MATURITY_LABELS = [
+  {
+    name: "maturity:stable",
+    color: "1F883D",
+    description: "Issue affects a taxonomy feature currently scored M4/M5.",
+  },
+] as const satisfies readonly {
+  name: MaturityLabelName;
+  color: string;
+  description: string;
+}[];
+const MATURITY_LABEL_NAMES: ReadonlySet<string> = new Set(
+  MATURITY_LABELS.map((label) => label.name),
 );
 const ISSUE_ADVISORY_LABELS = [
   {
@@ -1490,6 +1558,8 @@ const ALLOWED_REASONS = new Set<CloseReason>([
   "clawhub",
   "duplicate_or_superseded",
   "low_signal_unmergeable_pr",
+  "stalled_unproven_pr",
+  "abandoned_pr",
   "unconfirmed_product_direction",
   "not_actionable_in_repo",
   "incoherent",
@@ -1565,6 +1635,9 @@ const IMPACT_LABEL_VALUES = new Set<ImpactLabelName>(IMPACT_LABELS.map((label) =
 const MERGE_RISK_LABEL_VALUES = new Set<MergeRiskLabelName>(
   MERGE_RISK_LABELS.map((label) => label.name),
 );
+const MATURITY_LABEL_VALUES = new Set<MaturityLabelName>(
+  MATURITY_LABELS.map((label) => label.name),
+);
 const REVIEW_LABEL_VALUES = new Set<ReviewLabelName>([
   "P0",
   "P1",
@@ -1572,6 +1645,7 @@ const REVIEW_LABEL_VALUES = new Set<ReviewLabelName>([
   "P3",
   ...IMPACT_LABELS.map((label) => label.name),
   ...MERGE_RISK_LABELS.map((label) => label.name),
+  ...MATURITY_LABELS.map((label) => label.name),
 ]);
 const REAL_BEHAVIOR_PROOF_STATUSES = new Set<RealBehaviorProofStatus>([
   "sufficient",
@@ -1655,6 +1729,7 @@ const DECISION_SCHEMA_KEYS = new Set([
   "triagePriority",
   "impactLabels",
   "mergeRiskLabels",
+  "maturityLabels",
   "mergeRiskOptions",
   "reviewMetrics",
   "labelJustifications",
@@ -1758,6 +1833,7 @@ const REVIEW_FINDING_SCHEMA_KEYS = new Set([
   "file",
   "lineStart",
   "lineEnd",
+  "lateFinding",
 ]);
 const LIKELY_OWNER_SCHEMA_KEYS = new Set([
   "person",
@@ -1874,9 +1950,14 @@ function writeSweepStatus(options: {
   failedReviewRetryExhaustions?: number;
   botOwnedProofDecisionsRequested?: number;
   botOwnedProofDispatches?: number;
+  applyHealth?: Record<string, unknown> | null;
 }): void {
   const profile = options.profile ?? targetProfile();
   const updatedAt = new Date().toISOString();
+  const applyHealth =
+    options.applyHealth === undefined
+      ? readSweepStatusSummary(profile)?.applyHealth
+      : options.applyHealth;
   const payload = {
     schema_version: 1,
     slug: profile.slug,
@@ -1898,6 +1979,7 @@ function writeSweepStatus(options: {
     failed_review_retry_exhaustions: options.failedReviewRetryExhaustions ?? null,
     bot_owned_proof_decisions_requested: options.botOwnedProofDecisionsRequested ?? null,
     bot_owned_proof_dispatches: options.botOwnedProofDispatches ?? null,
+    apply_health: applyHealth ?? null,
     updated_at: updatedAt,
   };
   const outputPath = sweepStatusPath(profile);
@@ -1984,23 +2066,14 @@ function gh(args: string[]): string {
   return run("gh", ["--repo", targetRepo(), ...args]);
 }
 
-function ghBinArgs(): string[] {
-  const value = process.env.GH_BIN_ARGS;
-  if (!value) return [];
-  const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-    throw new Error("GH_BIN_ARGS must be a JSON string array");
-  }
-  return parsed;
-}
-
 function ghOnce(args: string[], timeoutMs: number): string {
-  const command = process.env.GH_BIN ?? "gh";
   const resolvedArgs = args[0] === "api" ? args : ["--repo", targetRepo(), ...args];
-  const result = spawnSync(command, [...ghBinArgs(), ...resolvedArgs], {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+  const command = resolveCommand("gh", resolvedArgs, env);
+  const result = spawnSync(command.command, command.args, {
     cwd: ROOT,
     encoding: "utf8",
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    env,
     maxBuffer: 8 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
@@ -2157,6 +2230,69 @@ function itemSnapshotHash(item: Item, context: ItemContext): string {
   return sha256(stableJson({ item: snapshotItem, context }));
 }
 
+function itemSourceRevisionSha256(issue: unknown, comments: unknown[] = []): string {
+  const source = asRecord(issue);
+  const snapshot = {
+    title: sourceRevisionScalar(source.title),
+    body: sourceRevisionScalar(source.body),
+    labels: revisionLabels(source.labels),
+    comments: comments
+      .map(asRecord)
+      .filter((comment) => !isClawSweeperComment(comment))
+      .map((comment) => ({
+        id: sourceRevisionScalar(comment.id),
+        author: sourceRevisionScalar(login(comment.user) ?? comment.author),
+        body: sourceRevisionScalar(comment.body),
+        updated_at: sourceRevisionScalar(
+          comment.updated_at ?? comment.updatedAt ?? comment.created_at,
+        ),
+      }))
+      .sort((left, right) =>
+        `${left.id}:${left.updated_at}`.localeCompare(`${right.id}:${right.updated_at}`),
+      ),
+  };
+  return sha256(JSON.stringify(snapshot));
+}
+
+function sourceRevisionScalar(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function revisionLabels(labels: unknown): string[] {
+  return (Array.isArray(labels) ? labels : [])
+    .map((label) => normalizeLabelName(String(asRecord(label).name ?? label)))
+    .filter(Boolean)
+    .filter((label) => !isIgnorableSourceRevisionLabel(label))
+    .sort();
+}
+
+function isIgnorableSourceRevisionLabel(label: string) {
+  return (
+    isClawSweeperAdvisorySourceRevisionLabel(label) ||
+    (label.startsWith("clawsweeper:") &&
+      !["clawsweeper:human-review", "clawsweeper:manual-only"].includes(label)) ||
+    label === "no-stale" ||
+    label === "stale"
+  );
+}
+
+function isClawSweeperAdvisorySourceRevisionLabel(label: string): boolean {
+  return (
+    /^(?:status|rating|proof|merge-risk|impact|issue-rating):/.test(label) ||
+    /^p[0-3]$/.test(label) ||
+    label === "feature: ✨ showcase" ||
+    label === "mantis: telegram-visible-proof" ||
+    label === "triage: needs-real-behavior-proof"
+  );
+}
+
+export function itemSourceRevisionSha256ForTest(issue: unknown, comments: unknown[] = []): string {
+  return itemSourceRevisionSha256(issue, comments);
+}
+
 function reviewPolicyHash(options: {
   model?: string;
   reasoningEffort?: string;
@@ -2270,6 +2406,12 @@ function requireMergeRiskLabels(value: unknown): MergeRiskLabelName[] {
   return labels;
 }
 
+function requireMaturityLabels(value: unknown): MaturityLabelName[] {
+  const labels = requireEnumArray(value, MATURITY_LABEL_VALUES, "decision.maturityLabels");
+  if (labels.length > 1) throw new Error("decision.maturityLabels must contain at most 1 label");
+  return labels;
+}
+
 function parseMergeRiskOption(value: unknown, path: string): MergeRiskOption {
   const record = requireRecord(value, path);
   rejectUnexpectedKeys(record, MERGE_RISK_OPTION_SCHEMA_KEYS, path);
@@ -2369,19 +2511,23 @@ function requireLabelJustifications(value: unknown): LabelJustification[] {
 }
 
 function selectedReviewLabels(
-  decision: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels">,
+  decision: Pick<
+    Decision,
+    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels"
+  >,
 ): ReviewLabelName[] {
   return [
     ...(decision.triagePriority === "none" ? [] : [decision.triagePriority]),
     ...decision.impactLabels,
     ...decision.mergeRiskLabels,
+    ...decision.maturityLabels,
   ];
 }
 
 function validateLabelJustifications(
   decision: Pick<
     Decision,
-    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "labelJustifications"
+    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels" | "labelJustifications"
   >,
 ): void {
   const selected = new Set<string>(selectedReviewLabels(decision));
@@ -2435,7 +2581,7 @@ function parseReviewFinding(value: unknown, path: string): ReviewFinding {
   const lineEnd = requireInteger(record.lineEnd, `${path}.lineEnd`);
   if (lineStart <= 0) throw new Error(`${path}.lineStart must be positive`);
   if (lineEnd < lineStart) throw new Error(`${path}.lineEnd must be >= lineStart`);
-  return {
+  const finding: ReviewFinding = {
     title: requireString(record.title, `${path}.title`),
     body: requireString(record.body, `${path}.body`),
     priority: requirePriority(record.priority, `${path}.priority`),
@@ -2444,6 +2590,10 @@ function parseReviewFinding(value: unknown, path: string): ReviewFinding {
     lineStart,
     lineEnd,
   };
+  if (record.lateFinding !== undefined) {
+    finding.lateFinding = requireBoolean(record.lateFinding, `${path}.lateFinding`);
+  }
+  return finding;
 }
 
 type DecisionNormalizationItem = Pick<Item, "repo" | "number" | "kind" | "authorAssociation">;
@@ -2850,6 +3000,7 @@ export function parseDecision(value: unknown, item?: DecisionNormalizationItem):
     ),
     impactLabels: requireImpactLabels(record.impactLabels),
     mergeRiskLabels: requireMergeRiskLabels(record.mergeRiskLabels),
+    maturityLabels: requireMaturityLabels(record.maturityLabels),
     mergeRiskOptions: requireMergeRiskOptions(record.mergeRiskOptions),
     reviewMetrics: requireReviewMetrics(record.reviewMetrics),
     labelJustifications: requireLabelJustifications(record.labelJustifications),
@@ -3147,7 +3298,7 @@ function unconfirmedProductDirectionApplyBlockReason(
   if (ageBlock) return ageBlock;
   const exemptLabel = item.labels
     .map(normalizeLabelName)
-    .find((label) => UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS.has(label));
+    .find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
   if (exemptLabel) return `${exemptLabel} exempts this PR from product-direction auto-close`;
 
   const issue = ghJson<{ assignees?: unknown[] }>([
@@ -3197,6 +3348,251 @@ function unconfirmedProductDirectionApplyBlockReasonSafe(
     return unconfirmedProductDirectionApplyBlockReason(number, item, reviewedUpdatedAt, reviewedAt);
   } catch (error) {
     return `product-direction calibration check failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+function pullRequestHumanEngagementBlockReason(number: number): string | null {
+  const issue = ghJson<{ assignees?: unknown[] }>([
+    "api",
+    `repos/${targetRepo()}/issues/${number}`,
+    "--jq",
+    "{assignees:[.assignees[]? | {login:.login}]}",
+  ]);
+  if ((issue.assignees ?? []).length > 0) return "assigned PR has active human signal";
+
+  const pull = ghJson<{ requested_reviewers?: unknown[]; requested_teams?: unknown[] }>([
+    "api",
+    `repos/${targetRepo()}/pulls/${number}`,
+    "--jq",
+    "{requested_reviewers:[.requested_reviewers[]? | {login:.login}],requested_teams:[.requested_teams[]? | {slug:.slug}]}",
+  ]);
+  if ((pull.requested_reviewers ?? []).length > 0 || (pull.requested_teams ?? []).length > 0) {
+    return "requested reviewers or teams indicate active review signal";
+  }
+
+  const maintainerComments = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/comments`),
+  );
+  if (maintainerComments.length > 0) return "maintainer issue comment blocks inactivity auto-close";
+
+  const maintainerReviews = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/reviews`),
+  );
+  if (maintainerReviews.length > 0) return "maintainer PR review blocks inactivity auto-close";
+
+  const maintainerInlineComments = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/comments`),
+  );
+  if (maintainerInlineComments.length > 0) {
+    return "maintainer inline review comment blocks inactivity auto-close";
+  }
+  return null;
+}
+
+interface PullRequestLiveActivity {
+  draft: boolean;
+  headSha: string;
+  headActivityAtMs: number | null;
+  headChecksFailing: boolean;
+}
+
+const FAILING_CHECK_RUN_CONCLUSIONS = new Set(["failure", "timed_out"]);
+
+// Committer dates alone under-report activity: a contributor can push an old
+// commit, so the inactivity clock also observes status/check-run timestamps,
+// which CI refreshes on every push. Missing data keeps the PR open.
+function pullRequestLiveActivity(number: number): PullRequestLiveActivity {
+  const pull = ghJson<{ draft?: boolean; head?: { sha?: string } }>([
+    "api",
+    `repos/${targetRepo()}/pulls/${number}`,
+  ]);
+  const headSha = typeof pull.head?.sha === "string" ? pull.head.sha : "";
+  let headActivityAtMs: number | null = null;
+  let headChecksFailing = false;
+  const observe = (value: unknown): void => {
+    const ms = Date.parse(typeof value === "string" ? value : "");
+    if (Number.isFinite(ms) && (headActivityAtMs === null || ms > headActivityAtMs)) {
+      headActivityAtMs = ms;
+    }
+  };
+  if (headSha) {
+    const commit = ghJson<{ commit?: { committer?: { date?: string } } }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}`,
+    ]);
+    observe(commit.commit?.committer?.date);
+    const combined = ghJson<{ state?: string; statuses?: unknown[] }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}/status`,
+    ]);
+    if (combined.state === "failure" || combined.state === "error") headChecksFailing = true;
+    for (const status of combined.statuses ?? []) {
+      const record = asRecord(status);
+      observe(record.updated_at);
+      observe(record.created_at);
+    }
+    const checks = ghJson<{ check_runs?: unknown[] }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}/check-runs?per_page=100`,
+    ]);
+    for (const run of checks.check_runs ?? []) {
+      const record = asRecord(run);
+      if (
+        typeof record.conclusion === "string" &&
+        FAILING_CHECK_RUN_CONCLUSIONS.has(record.conclusion)
+      ) {
+        headChecksFailing = true;
+      }
+      observe(record.started_at);
+      observe(record.completed_at);
+    }
+  }
+  return { draft: pull.draft === true, headSha, headActivityAtMs, headChecksFailing };
+}
+
+function prAutoCloseExemptLabel(labels: readonly string[]): string | undefined {
+  return labels.map(normalizeLabelName).find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
+}
+
+export function stalledUnprovenPrAgeSkipReason(
+  item: Pick<Item, "createdAt">,
+  now = Date.now(),
+): string | null {
+  if (!isOlderThanDays(item.createdAt, STALLED_UNPROVEN_PR_MIN_AGE_DAYS, now)) {
+    return `stalled_unproven_pr requires PR older than ${STALLED_UNPROVEN_PR_MIN_AGE_DAYS} days`;
+  }
+  return null;
+}
+
+const STALLED_PROOF_REQUEST_LABELS = new Set([
+  "triage: needs-real-behavior-proof",
+  "status: 📣 needs proof",
+]);
+
+// The durable review comment is edited in place, so its created_at cannot
+// date the proof ask. Only immutable signals count: needs-proof label
+// timeline events and proof-nudge comment creation times.
+export function stalledUnprovenProofRequestBlockReason(
+  number: number,
+  now = Date.now(),
+): string | null {
+  let earliestRequestAtMs: number | null = null;
+  const observe = (value: unknown): void => {
+    const ms = Date.parse(typeof value === "string" ? value : "");
+    if (Number.isFinite(ms) && (earliestRequestAtMs === null || ms < earliestRequestAtMs)) {
+      earliestRequestAtMs = ms;
+    }
+  };
+  for (const event of ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/timeline`)) {
+    const record = asRecord(event);
+    if (record.event !== "labeled") continue;
+    const labelName = asRecord(record.label).name;
+    if (typeof labelName !== "string") continue;
+    if (!STALLED_PROOF_REQUEST_LABELS.has(normalizeLabelName(labelName))) continue;
+    observe(record.created_at);
+  }
+  for (const comment of ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/comments`)) {
+    const record = asRecord(comment);
+    const body = typeof record.body === "string" ? record.body : "";
+    if (!body.includes(PROOF_NUDGE_MARKER_PREFIX)) continue;
+    observe(record.created_at);
+  }
+  if (earliestRequestAtMs === null) {
+    return "no visible dated proof request (needs-proof label event or proof nudge) on the live PR";
+  }
+  if (now - earliestRequestAtMs <= STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS * DAY_MS) {
+    return `stalled_unproven_pr requires the proof request to be visible for ${STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS} days`;
+  }
+  return null;
+}
+
+export function abandonedPrAgeSkipReason(
+  item: Pick<Item, "createdAt">,
+  now = Date.now(),
+): string | null {
+  if (!isOlderThanDays(item.createdAt, ABANDONED_PR_MIN_AGE_DAYS, now)) {
+    return `abandoned_pr requires PR older than ${ABANDONED_PR_MIN_AGE_DAYS} days`;
+  }
+  return null;
+}
+
+function stalledUnprovenPrApplyBlockReason(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  const ageBlock = stalledUnprovenPrAgeSkipReason(item);
+  if (ageBlock) return ageBlock;
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from stalled-unproven auto-close`;
+  const proofLabel = item.labels
+    .map(normalizeLabelName)
+    .find(
+      (label) =>
+        label === normalizeLabelName(PROOF_SUFFICIENT_LABEL) ||
+        label === normalizeLabelName(PROOF_OVERRIDE_LABEL),
+    );
+  if (proofLabel) return `${proofLabel} marks the requested proof as resolved`;
+  const proofRequestBlock = stalledUnprovenProofRequestBlockReason(number);
+  if (proofRequestBlock) return proofRequestBlock;
+  const activity = pullRequestLiveActivity(number);
+  if (activity.draft) return "draft PR is handled by the abandoned-PR policy, not stalled-unproven";
+  if (
+    activity.headActivityAtMs === null ||
+    Date.now() - activity.headActivityAtMs <= STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS * DAY_MS
+  ) {
+    return `stalled_unproven_pr requires ${STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS} days without new head commit or check activity`;
+  }
+  return pullRequestHumanEngagementBlockReason(number);
+}
+
+function stalledUnprovenPrApplyBlockReasonSafe(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  try {
+    return stalledUnprovenPrApplyBlockReason(number, item);
+  } catch (error) {
+    return `stalled-unproven liveness check failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+function abandonedPrApplyBlockReason(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  const ageBlock = abandonedPrAgeSkipReason(item);
+  if (ageBlock) return ageBlock;
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from abandoned-PR auto-close`;
+  const activity = pullRequestLiveActivity(number);
+  if (
+    activity.headActivityAtMs === null ||
+    Date.now() - activity.headActivityAtMs <= ABANDONED_PR_MIN_INACTIVE_DAYS * DAY_MS
+  ) {
+    return `abandoned_pr requires ${ABANDONED_PR_MIN_INACTIVE_DAYS} days without new head commit or check activity`;
+  }
+  const waitingOnAuthor = item.labels
+    .map(normalizeLabelName)
+    .includes(normalizeLabelName(WAITING_ON_AUTHOR_LABEL));
+  const stalledState = activity.draft || waitingOnAuthor || activity.headChecksFailing;
+  if (!stalledState) {
+    return "live PR is not draft, waiting-on-author, or failing checks; abandonment is not confirmed";
+  }
+  return pullRequestHumanEngagementBlockReason(number);
+}
+
+function abandonedPrApplyBlockReasonSafe(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  try {
+    return abandonedPrApplyBlockReason(number, item);
+  } catch (error) {
+    return `abandoned-PR liveness check failed: ${
       error instanceof Error ? error.message : String(error)
     }`;
   }
@@ -3293,6 +3689,8 @@ interface PreviousClawSweeperReview {
   rating: string;
   nextStep: string;
   findings: Array<{ priority: string; title: string }>;
+  earlierReviewCycles: ReviewHistoryCycle[];
+  completedReviewCycles: number;
   commentId: unknown;
   commentUrl: unknown;
   commentUpdatedAt: unknown;
@@ -3486,21 +3884,14 @@ function previousReviewProofStatus(body: string): string {
   return firstMergeReadinessLine(body, "Proof:");
 }
 
-function previousReviewFindings(body: string): Array<{ priority: string; title: string }> {
-  return body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .flatMap((line) => {
-      if (!line.startsWith("- [P")) return [];
-      const close = line.indexOf("]");
-      if (close < 5) return [];
-      const priority = line.slice(3, close);
-      if (!/^P[0-3]$/.test(priority)) return [];
-      const rest = line.slice(close + 1).trim();
-      const dash = minNonNegative([rest.indexOf(" - "), rest.indexOf(" — ")]);
-      const title = (dash < 0 ? rest : rest.slice(0, dash)).trim();
-      return title ? [{ priority, title }] : [];
-    });
+function reviewHistoryFindings(
+  cycle: ReviewHistoryCycle | undefined,
+): Array<{ priority: string; title: string }> {
+  if (!cycle) return [];
+  return cycle.findings.flatMap((finding) => {
+    const match = finding.match(/^\[(P[0-3])\]\s+(.+)$/);
+    return match?.[1] && match[2] ? [{ priority: match[1], title: match[2] }] : [];
+  });
 }
 
 function extractLatestClawSweeperReview(
@@ -3515,11 +3906,18 @@ function extractLatestClawSweeperReview(
   const body = rawCommentBody(latest);
   const verdictMarker = htmlMarkerWithPrefix(body, "clawsweeper-verdict:");
   const actionMarker = htmlMarkerWithPrefix(body, "clawsweeper-action:");
-  const reviewedSha = markerAttribute(verdictMarker, "sha") ?? markerAttribute(actionMarker, "sha");
+  const history = parseReviewHistory(body);
+  const currentCycle = reviewHistoryCycleFromCommentBody(body);
+  const latestCompletedCycle = currentCycle ?? history.cycles.at(-1);
+  const earlierReviewCycles = currentCycle ? history.cycles : history.cycles.slice(0, -1);
   return {
     status: previousReviewStatus(body),
-    reviewedAt: previousReviewReviewedAt(body),
-    reviewedSha,
+    reviewedAt: previousReviewReviewedAt(body) ?? latestCompletedCycle?.reviewedAt ?? null,
+    reviewedSha:
+      markerAttribute(verdictMarker, "sha") ??
+      markerAttribute(actionMarker, "sha") ??
+      latestCompletedCycle?.sha ??
+      null,
     verdictMarker,
     actionMarker,
     summary: firstNonEmptyLine(markdownSection(body, "Summary")),
@@ -3528,7 +3926,9 @@ function extractLatestClawSweeperReview(
     nextStep:
       firstNonEmptyLine(markdownSection(body, "Next step before merge")) ||
       firstNonEmptyLine(markdownSection(body, "Next step")),
-    findings: previousReviewFindings(body),
+    findings: reviewHistoryFindings(latestCompletedCycle),
+    earlierReviewCycles,
+    completedReviewCycles: history.totalCompletedCycles + (currentCycle ? 1 : 0),
     commentId: comment.id,
     commentUrl: comment.html_url,
     commentUpdatedAt: comment.updated_at,
@@ -5160,126 +5560,6 @@ function isCurrentForCadence(options: {
   return options.now - reviewedAt < options.cadenceMs;
 }
 
-function reviewedAtMs(review: ExistingReview | null): number | null {
-  if (review?.reviewStatus !== "complete") return null;
-  if (!review.reviewedAt) return null;
-  const reviewedAt = Date.parse(review.reviewedAt);
-  return Number.isFinite(reviewedAt) ? reviewedAt : null;
-}
-
-function hasActivitySinceReview(item: Item, review: ExistingReview | null): boolean {
-  if (!review) return false;
-  const updatedAt = Date.parse(item.updatedAt);
-  const reviewedAt = reviewedAtMs(review);
-  const reviewCommentSyncedAt = timestampMs(review.reviewCommentSyncedAt);
-  const labelsSyncedAt = timestampMs(review.labelsSyncedAt);
-  const botOwnedSyncedAt = Math.max(
-    reviewCommentSyncedAt ?? -Infinity,
-    labelsSyncedAt ?? -Infinity,
-  );
-  if (review.itemUpdatedAt) {
-    if (item.updatedAt === review.itemUpdatedAt) return false;
-    if (Number.isFinite(updatedAt) && reviewedAt !== null && updatedAt <= reviewedAt) return false;
-    if (
-      Number.isFinite(updatedAt) &&
-      Number.isFinite(botOwnedSyncedAt) &&
-      updatedAt <= botOwnedSyncedAt
-    ) {
-      return false;
-    }
-    return true;
-  }
-  if (
-    Number.isFinite(updatedAt) &&
-    Number.isFinite(botOwnedSyncedAt) &&
-    updatedAt <= botOwnedSyncedAt
-  ) {
-    return false;
-  }
-  return reviewedAt !== null && Number.isFinite(updatedAt) && updatedAt > reviewedAt;
-}
-
-function isCreatedWithinDays(
-  item: Pick<Item, "createdAt">,
-  days: number,
-  now = Date.now(),
-): boolean {
-  const createdAt = Date.parse(item.createdAt);
-  return Number.isFinite(createdAt) && now - createdAt < days * DAY_MS;
-}
-
-function reviewCadenceMs(item: Item, review: ExistingReview | null, now = Date.now()): number {
-  if (hasActivitySinceReview(item, review)) return HOURLY_REVIEW_MS;
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) return DAILY_REVIEW_DAYS * DAY_MS;
-  if (item.kind === "pull_request") return DAILY_REVIEW_DAYS * DAY_MS;
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) {
-    return DAILY_REVIEW_DAYS * DAY_MS;
-  }
-  return WEEKLY_REVIEW_DAYS * DAY_MS;
-}
-
-function hasReviewPolicyMismatch(review: ExistingReview | null, reviewPolicy?: string): boolean {
-  return Boolean(review && reviewPolicy && review.reviewPolicy !== reviewPolicy);
-}
-
-export function shouldReviewItem(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): boolean {
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return true;
-  const reviewedAt = reviewedAtMs(review);
-  if (reviewedAt === null) return true;
-  return now - reviewedAt >= reviewCadenceMs(item, review, now);
-}
-
-export function reviewPriority(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): number {
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now) && item.kind === "issue") return 0;
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) return 1;
-  if (hasActivitySinceReview(item, review)) return 2;
-  if (item.kind === "pull_request") return 3;
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) return 4;
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return 5;
-  return 6;
-}
-
-function schedulerBucket(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-): SchedulerBucket {
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) {
-    return item.kind === "issue" ? "hot_issue" : "hot_pull_request";
-  }
-  if (hasActivitySinceReview(item, review)) return "activity";
-  if (item.kind === "pull_request") return "daily_pull_request";
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) {
-    return "recent_issue";
-  }
-  return "weekly_issue";
-}
-
-function nextReviewDueAtMs(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): number {
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return 0;
-  const reviewedAt = reviewedAtMs(review);
-  if (reviewedAt === null) return 0;
-  return reviewedAt + reviewCadenceMs(item, review, now);
-}
-
 function dueCandidate(
   item: Item,
   itemsDir: string,
@@ -5321,196 +5601,6 @@ function reviewBackfillCandidate(
     nextDueAt: nextReviewDueAtMs(item, review, now, reviewPolicy),
     bucket: schedulerBucket(item, review, now),
   };
-}
-
-function compareDueCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.priority - right.priority ||
-    left.nextDueAt - right.nextDueAt ||
-    left.reviewedAt - right.reviewedAt ||
-    left.item.number - right.item.number
-  );
-}
-
-function compareBackfillCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.nextDueAt - right.nextDueAt ||
-    left.reviewedAt - right.reviewedAt ||
-    left.priority - right.priority ||
-    left.item.number - right.item.number
-  );
-}
-
-function weeklyReviewDeadlineMs(candidate: DueCandidate): number {
-  if (candidate.reviewedAt > 0) {
-    return candidate.reviewedAt + WEEKLY_REVIEW_DAYS * DAY_MS;
-  }
-  const createdAt = Date.parse(candidate.item.createdAt);
-  return Number.isFinite(createdAt) ? createdAt + WEEKLY_REVIEW_DAYS * DAY_MS : 0;
-}
-
-const SCHEDULER_BUCKET_WEIGHTS: ReadonlyArray<readonly [SchedulerBucket, number]> = [
-  ["hot_issue", 4],
-  ["hot_pull_request", 2],
-  ["activity", 2],
-  ["daily_pull_request", 3],
-  ["recent_issue", 2],
-  ["weekly_issue", 1],
-];
-
-function selectDueCandidates(
-  due: DueCandidate[],
-  limit: number,
-  compare: (left: DueCandidate, right: DueCandidate) => number = compareDueCandidates,
-  now = Date.now(),
-): DueCandidate[] {
-  const capacity = Math.max(0, limit);
-  if (capacity === 0) return [];
-  const buckets = new Map<SchedulerBucket, DueCandidate[]>();
-  for (const [bucket] of SCHEDULER_BUCKET_WEIGHTS) buckets.set(bucket, []);
-  for (const candidate of due) buckets.get(candidate.bucket)?.push(candidate);
-  for (const candidates of buckets.values()) candidates.sort(compare);
-
-  const selected: DueCandidate[] = [];
-  const selectedKeys = new Set<string>();
-  const take = (candidate: DueCandidate | undefined): void => {
-    if (!candidate || selected.length >= capacity) return;
-    const key = existingReviewKey(candidate.item.repo, candidate.item.number);
-    if (selectedKeys.has(key)) return;
-    selectedKeys.add(key);
-    selected.push(candidate);
-  };
-
-  // Weekly freshness is the outer SLO. Catch up breached items before applying
-  // the normal weighted mix for hourly and daily work.
-  const weeklyOverdue = due
-    .filter((candidate) => weeklyReviewDeadlineMs(candidate) <= now)
-    .sort(
-      (left, right) =>
-        weeklyReviewDeadlineMs(left) - weeklyReviewDeadlineMs(right) || compare(left, right),
-    );
-  for (const candidate of weeklyOverdue) take(candidate);
-  for (const [bucket, candidates] of buckets) {
-    buckets.set(
-      bucket,
-      candidates.filter(
-        (candidate) =>
-          !selectedKeys.has(existingReviewKey(candidate.item.repo, candidate.item.number)),
-      ),
-    );
-  }
-
-  while (selected.length < capacity) {
-    const before = selected.length;
-    for (const [bucket, weight] of SCHEDULER_BUCKET_WEIGHTS) {
-      const candidates = buckets.get(bucket);
-      if (!candidates?.length) continue;
-      for (let i = 0; i < weight && candidates.length && selected.length < capacity; i += 1) {
-        take(candidates.shift());
-      }
-    }
-    if (selected.length === before) break;
-  }
-
-  return selected;
-}
-
-function appendFloorBackfillCandidates(
-  selected: DueCandidate[],
-  backfill: DueCandidate[],
-  options: { activeFloor: number; capacity: number },
-): DueCandidate[] {
-  const activeFloor = Math.max(0, Math.floor(options.activeFloor));
-  const capacity = Math.max(0, Math.floor(options.capacity));
-  const target = Math.min(activeFloor, capacity);
-  if (selected.length >= target) return selected;
-  const selectedKeys = new Set(
-    selected.map((candidate) => existingReviewKey(candidate.item.repo, candidate.item.number)),
-  );
-  const filled = [...selected];
-  for (const candidate of [...backfill].sort(compareBackfillCandidates)) {
-    if (filled.length >= target) break;
-    const key = existingReviewKey(candidate.item.repo, candidate.item.number);
-    if (selectedKeys.has(key)) continue;
-    selectedKeys.add(key);
-    filled.push(candidate);
-  }
-  return filled;
-}
-
-export function selectDueCandidateNumbersForTest(
-  due: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  limit: number,
-  now = Date.now(),
-): number[] {
-  return selectDueCandidates(
-    due.map((candidate) => ({
-      item: candidate.item,
-      review: null,
-      priority: candidate.priority ?? reviewPriority(candidate.item, null),
-      reviewedAt: candidate.reviewedAt ?? 0,
-      nextDueAt: candidate.nextDueAt ?? 0,
-      bucket: candidate.bucket,
-    })),
-    limit,
-    compareDueCandidates,
-    now,
-  ).map((candidate) => candidate.item.number);
-}
-
-export function appendFloorBackfillCandidateNumbersForTest(
-  selected: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  backfill: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  activeFloor: number,
-  capacity: number,
-): number[] {
-  const normalize = (candidate: (typeof selected)[number]): DueCandidate => ({
-    item: candidate.item,
-    review: null,
-    priority: candidate.priority ?? reviewPriority(candidate.item, null),
-    reviewedAt: candidate.reviewedAt ?? 0,
-    nextDueAt: candidate.nextDueAt ?? 0,
-    bucket: candidate.bucket,
-  });
-  return appendFloorBackfillCandidates(selected.map(normalize), backfill.map(normalize), {
-    activeFloor,
-    capacity,
-  }).map((candidate) => candidate.item.number);
-}
-
-function compareHotIntakeDueCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.priority - right.priority ||
-    hotIntakeRecencyMs(right.item) - hotIntakeRecencyMs(left.item) ||
-    right.item.number - left.item.number
-  );
-}
-
-export function hotIntakeRecencyMs(item: Pick<Item, "createdAt" | "updatedAt">): number {
-  const updatedAt = Date.parse(item.updatedAt);
-  const createdAt = Date.parse(item.createdAt);
-  return Math.max(
-    Number.isFinite(updatedAt) ? updatedAt : 0,
-    Number.isFinite(createdAt) ? createdAt : 0,
-  );
 }
 
 function fetchOpenItemPage(
@@ -5931,6 +6021,36 @@ function selectCandidates(options: {
   return { candidates, scannedPages };
 }
 
+function exactLocalReviewNoCandidateError(
+  itemNumber: number | undefined,
+  shardIndex: number,
+): UserFacingCommandError {
+  if (itemNumber === undefined) {
+    return new UserFacingCommandError("No review was run because no item number was provided.");
+  }
+  if (shardIndex !== 0) {
+    return new UserFacingCommandError(
+      `No review was run for ${targetRepo()}#${itemNumber} because exact item reviews only run on shard 0. Remove --shard-index for local reviews.`,
+    );
+  }
+  try {
+    const { item, state } = fetchItem(itemNumber);
+    if (state !== "open") {
+      return new UserFacingCommandError(
+        `No review was run for ${targetRepo()}#${itemNumber} because GitHub reports this ${item.kind === "pull_request" ? "PR" : "issue"} is ${state}. Local exact review only reviews open items.`,
+      );
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return new UserFacingCommandError(
+      `No review was run for ${targetRepo()}#${itemNumber} because the item could not be loaded from GitHub. If this is a different repository, pass --target-repo owner/name. ${reason}`,
+    );
+  }
+  return new UserFacingCommandError(
+    `No review was run for ${targetRepo()}#${itemNumber}. The item was not selected for review.`,
+  );
+}
+
 function openExplicitItems(itemNumbers: readonly number[]): Item[] {
   const seen = new Set<number>();
   const candidates: Item[] = [];
@@ -5975,13 +6095,6 @@ function oldestUnreviewedAt(candidates: readonly DueCandidate[]): string | undef
     oldest = candidate.item.createdAt;
   }
   return oldest;
-}
-
-export function shouldStopSaturatedPlanScan(options: {
-  dueCount: number;
-  capacity: number;
-}): boolean {
-  return options.capacity > 0 && options.dueCount >= options.capacity;
 }
 
 function planCapacityReason(options: {
@@ -6195,6 +6308,9 @@ function collectItemContext(
     24,
   );
   const comments = commentsWindow.items;
+  const sourceRevisionComments = commentsWindow.truncated
+    ? ghPaged<unknown>(`repos/${targetRepo()}/issues/${item.number}/comments`)
+    : comments;
   const filteredComments = filterReviewContextComments(comments, item.number);
   const previousClawSweeperReview = extractLatestClawSweeperReview(comments, item.number);
   const timelineWindow = ghPagedLinkHeaderContextWindow<unknown>(
@@ -6204,6 +6320,7 @@ function collectItemContext(
   const timeline = timelineWindow.items;
   const context: ItemContext = {
     issue: compactIssue(issue),
+    sourceRevision: itemSourceRevisionSha256(issue, sourceRevisionComments),
     comments: compactMappedWindow(
       filteredComments.included,
       filteredComments.included.length,
@@ -6368,8 +6485,13 @@ function collectItemContext(
   return context;
 }
 
-function gitInfo(openclawDir: string): GitInfo {
-  const targetBranch = reviewTargetBranch(openclawDir);
+type ReviewGitInfoOptions = {
+  targetBranch?: string;
+};
+
+function gitInfo(openclawDir: string, options: ReviewGitInfoOptions = {}): GitInfo {
+  const targetBranch = options.targetBranch ?? reviewTargetBranch(openclawDir);
+  requireSafeGitBranchName(targetBranch, "target branch");
   run(
     "git",
     ["fetch", "origin", `${targetBranch}:refs/remotes/origin/${targetBranch}`, "--depth=50"],
@@ -6408,8 +6530,215 @@ function gitInfo(openclawDir: string): GitInfo {
 
 function reviewTargetBranch(openclawDir: string): string {
   const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: openclawDir });
-  if (/^[A-Za-z0-9_./-]+$/.test(branch) && branch !== "HEAD") return branch;
+  if (isSafeGitBranchName(branch) && branch !== "HEAD") return branch;
   return "main";
+}
+
+function isSafeGitBranchName(branch: string): boolean {
+  return /^[A-Za-z0-9_./-]+$/.test(branch) && !branch.startsWith("-");
+}
+
+function requireSafeGitBranchName(branch: string, label: string): string {
+  if (isSafeGitBranchName(branch) && branch !== "HEAD") return branch;
+  throw new UserFacingCommandError(`Invalid ${label}: ${branch}`);
+}
+
+type LocalPullMetadata = {
+  baseRef: string;
+};
+
+function localPullMetadata(itemNumber: number): LocalPullMetadata {
+  try {
+    const pull = asRecord(ghJson<unknown>(["api", `repos/${targetRepo()}/pulls/${itemNumber}`]));
+    const baseRef = stringOrUndefined(asRecord(pull.base).ref);
+    if (!baseRef) throw new Error("pull request base ref was missing");
+    return { baseRef: requireSafeGitBranchName(baseRef, "pull request base branch") };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new UserFacingCommandError(
+      `Could not load pull request #${itemNumber} from ${targetRepo()} for managed local checkout. ` +
+        `Pass --target-dir to review an existing checkout. ${reason}`,
+    );
+  }
+}
+
+function tryLocalPullBaseBranch(itemNumber: number): string | undefined {
+  try {
+    return localPullMetadata(itemNumber).baseRef;
+  } catch {
+    return undefined;
+  }
+}
+
+type ReviewCheckout = {
+  mode: "managed" | "supplied" | "default";
+  openclawDir: string;
+  gitTargetBranch?: string;
+};
+
+function hasExplicitReviewTargetDir(args: Args): boolean {
+  return typeof args.target_dir === "string" || typeof args.openclaw_dir === "string";
+}
+
+function localExactReviewItem(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): itemNumber is number {
+  return localOnly && itemNumber !== undefined && itemNumbers === undefined;
+}
+
+function defaultReviewArtifactDir(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): string {
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers)) {
+    return `artifacts/local-review-${itemNumber}`;
+  }
+  return "artifacts/reviews";
+}
+
+function resolveReviewCheckout(options: {
+  args: Args;
+  artifactDir: string;
+  humanLocalReview?: boolean;
+  itemNumber: number | undefined;
+  itemNumbers: number[] | undefined;
+  localOnly: boolean;
+  profile: RepositoryProfile;
+  verbose?: boolean;
+}): ReviewCheckout {
+  const { args, artifactDir, humanLocalReview, itemNumber, itemNumbers, localOnly, profile } =
+    options;
+  const explicitTargetDir = hasExplicitReviewTargetDir(args);
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers) && !explicitTargetDir) {
+    const pull = localPullMetadata(itemNumber);
+    const openclawDir = join(artifactDir, "target");
+    if (humanLocalReview) {
+      console.error("  mode: managed PR checkout");
+      console.error(`  path: ${displayPath(openclawDir)}`);
+      console.error(`  base: ${pull.baseRef}`);
+    }
+    prepareManagedLocalReviewCheckout({
+      baseBranch: pull.baseRef,
+      itemNumber,
+      targetDir: openclawDir,
+      targetRepo: targetRepo(),
+      verbose: options.verbose,
+    });
+    return { mode: "managed", openclawDir, gitTargetBranch: pull.baseRef };
+  }
+
+  const openclawDir = resolve(
+    stringArg(args.target_dir, stringArg(args.openclaw_dir, `../${profile.checkoutDir}`)),
+  );
+  if (humanLocalReview) {
+    console.error(`  mode: ${explicitTargetDir ? "supplied checkout" : "default checkout"}`);
+    console.error(`  path: ${displayPath(openclawDir)}`);
+  }
+  if (localExactReviewItem(localOnly, itemNumber, itemNumbers)) {
+    const baseBranch = tryLocalPullBaseBranch(itemNumber);
+    if (baseBranch) {
+      if (humanLocalReview) console.error(`  base: ${baseBranch}`);
+      return {
+        mode: explicitTargetDir ? "supplied" : "default",
+        openclawDir,
+        gitTargetBranch: baseBranch,
+      };
+    }
+  }
+  return { mode: explicitTargetDir ? "supplied" : "default", openclawDir };
+}
+
+type ManagedLocalReviewCheckoutOptions = {
+  baseBranch: string;
+  cloneUrl?: string;
+  itemNumber: number;
+  targetDir: string;
+  targetRepo: string;
+  verbose?: boolean | undefined;
+};
+
+function prepareManagedLocalReviewCheckout(options: ManagedLocalReviewCheckoutOptions): void {
+  const { baseBranch, cloneUrl, itemNumber, targetDir, targetRepo, verbose } = options;
+  const remoteUrl = cloneUrl ?? githubCloneUrl(targetRepo);
+  ensureDir(dirname(targetDir));
+  const targetExists = existsSync(targetDir);
+  if (targetExists && !isGitWorkTree(targetDir)) {
+    const entries = readdirSync(targetDir);
+    if (entries.length > 0) {
+      throw new UserFacingCommandError(
+        `Managed local checkout target already exists and is not a git checkout: ${targetDir}. ` +
+          "Pass --target-dir to use an existing checkout or choose a different --artifact-dir.",
+      );
+    }
+  }
+  if (!targetExists || !isGitWorkTree(targetDir)) {
+    run("git", ["clone", "--filter=blob:none", "--no-checkout", remoteUrl, targetDir]);
+  } else {
+    ensureGitOriginRemote(targetDir, remoteUrl);
+  }
+
+  const branch = `clawsweeper/pr-${itemNumber}`;
+  if (verbose) {
+    console.error(
+      `[review] ${new Date().toISOString()} local-checkout=managed target=${targetDir} pr=#${itemNumber} base=${baseBranch}`,
+    );
+  }
+  run("git", ["fetch", "--force", "origin", `refs/pull/${itemNumber}/head`, "--depth=50"], {
+    cwd: targetDir,
+  });
+  run("git", ["checkout", "-f", "-B", branch, "FETCH_HEAD"], { cwd: targetDir });
+}
+
+function isGitWorkTree(dir: string): boolean {
+  try {
+    return run("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir }) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function githubCloneUrl(targetRepo: string): string {
+  return `https://github.com/${targetRepo}.git`;
+}
+
+function ensureGitOriginRemote(dir: string, remoteUrl: string): void {
+  try {
+    run("git", ["remote", "set-url", "origin", remoteUrl], { cwd: dir });
+  } catch {
+    run("git", ["remote", "add", "origin", remoteUrl], { cwd: dir });
+  }
+}
+
+function displayPath(path: string): string {
+  const relativePath = relative(process.cwd(), path);
+  if (!relativePath) return ".";
+  return relativePath.startsWith("..") ? path : relativePath;
+}
+
+function displayDurationMs(ms: number): string {
+  const boundedMs = Math.max(0, Math.floor(ms));
+  const seconds = Math.floor(boundedMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
+
+export function defaultReviewArtifactDirForTest(
+  localOnly: boolean,
+  itemNumber: number | undefined,
+  itemNumbers: number[] | undefined,
+): string {
+  return defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers);
+}
+
+export function prepareManagedLocalReviewCheckoutForTest(
+  options: ManagedLocalReviewCheckoutOptions,
+): void {
+  prepareManagedLocalReviewCheckout(options);
 }
 
 export function reviewPromptTemplate(): string {
@@ -6662,6 +6991,9 @@ function buildReviewPrompt(
   const contextJson = contextJsonForPrompt(context);
   const schema = reviewDecisionSchemaText();
   const proofScratchDir = runtimeHints.proofScratchDir?.trim();
+  const maturityHelperPath = proofScratchDir
+    ? `\`${proofScratchDir}/maturity-stable-shortlist.mjs\``
+    : "the scratch directory as `maturity-stable-shortlist.mjs`";
   const mediaProofPrompt = mediaProofRuntimePrompt(
     runtimeHints.mediaProofSummary,
     runtimeHints.mediaProofManifestPath,
@@ -6696,6 +7028,7 @@ ${additionalPrompt.trim()}
 - You may use the available network and read-only GitHub token to inspect PR body links, comments, screenshots, videos, logs, terminal output, and target-repo artifacts.
 - Download proof artifacts into ${proofScratchDir ? `\`${proofScratchDir}\`` : "a temporary scratch directory"} before inspecting them.
 - The target checkout is read-only for review. Do not modify repository files; use the scratch directory or /tmp for downloaded evidence and generated video stills/contact sheets.
+- A token-light maturity helper is available at ${maturityHelperPath}. For issue maturity labels, first run \`node "$CLAWSWEEPER_PROOF_SCRATCH_DIR/maturity-stable-shortlist.mjs"\` from the target checkout and compare the issue against that shortlist; read the full scorecard or taxonomy only if the shortlist is ambiguous.
 ${mediaProofPrompt}
 
 ## GitHub Context
@@ -6715,6 +7048,31 @@ ${extra}
       additionalPromptChars: additionalPrompt.trim().length,
     },
   };
+}
+
+function prepareMaturityStableShortlistScript(proofScratchDir: string, openclawDir: string): void {
+  const scorecardPath = join(openclawDir, "qa", "maturity-scores.yaml");
+  const shortlist = maturityStableShortlist(scorecardPath);
+  writeFileSync(
+    join(proofScratchDir, "maturity-stable-shortlist.mjs"),
+    `#!/usr/bin/env node\nconsole.log(${JSON.stringify(shortlist)});\n`,
+    "utf8",
+  );
+}
+
+function maturityStableShortlist(scorecardPath: string): string {
+  const result = spawnSync(
+    process.execPath,
+    [MATURITY_STABLE_SHORTLIST_SCRIPT_PATH, scorecardPath],
+    {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  if (result.status === 0) return result.stdout.trim();
+  const detail =
+    result.stderr?.trim() || result.error?.message || "maturity shortlist script failed";
+  return `Unable to read maturity shortlist: ${detail}`;
 }
 
 function reviewPromptTelemetry(
@@ -6882,6 +7240,7 @@ function codexFailureDecision(
     triagePriority: "none",
     impactLabels: [],
     mergeRiskLabels: [],
+    maturityLabels: [],
     mergeRiskOptions: [],
     reviewMetrics: [],
     labelJustifications: [],
@@ -6977,11 +7336,11 @@ function redactedOutputTail(value: string | Buffer | null | undefined, maxLength
       .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]")
       .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]")
       .replace(
-        /\b(OPENAI_API_KEY|CODEX_API_KEY|GH_TOKEN|GITHUB_TOKEN)=([^\s"']+)/g,
+        /\b(OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|GH_TOKEN|GITHUB_TOKEN)=([^\s"']+)/g,
         "$1=[REDACTED]",
       )
       .replace(
-        /"((?:OPENAI_API_KEY|CODEX_API_KEY|GH_TOKEN|GITHUB_TOKEN))"\s*:\s*"[^"]*"/g,
+        /"((?:OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|GH_TOKEN|GITHUB_TOKEN))"\s*:\s*"[^"]*"/g,
         '"$1":"[REDACTED]"',
       ),
   );
@@ -7067,6 +7426,14 @@ export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decisi
   return runCodex(options);
 }
 
+export function reviewCodexForcedLoginMethodForTest(args: Args): string {
+  return reviewCodexForcedLoginMethod(args);
+}
+
+function reviewCodexForcedLoginMethod(args: Args): string {
+  return stringArg(args.codex_forced_login_method, "");
+}
+
 function runCodex(options: {
   item: Item;
   context: ItemContext;
@@ -7076,16 +7443,21 @@ function runCodex(options: {
   reasoningEffort: string;
   sandboxMode: string;
   serviceTier: string;
+  forcedLoginMethod?: string;
+  preserveCodexAuth?: boolean;
+  preferWindowsAppBinary?: boolean;
   timeoutMs: number;
   workDir: string;
   additionalPrompt?: string;
   proofScratchDir?: string;
   prompt?: string;
+  quietLogs?: boolean;
 }): Decision {
   ensureDir(options.workDir);
   const proofScratchDir =
     options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
   ensureDir(proofScratchDir);
+  prepareMaturityStableShortlistScript(proofScratchDir, options.openclawDir);
   const preparedMediaProof = options.prompt
     ? { manifestPath: null, summaryPath: null, artifacts: [] }
     : prepareMediaProofArtifacts(options.context, proofScratchDir);
@@ -7114,11 +7486,12 @@ function runCodex(options: {
   );
   const startedAt = Date.now();
   const runReviewPass = (reasoningEffort: string, passAttempts: number): Decision => {
-    const codexConfig = [
-      `model_reasoning_effort="${reasoningEffort}"`,
-      codexLoginConfig(),
-      'approval_policy="never"',
-    ];
+    const codexConfig = [`model_reasoning_effort="${reasoningEffort}"`, 'approval_policy="never"'];
+    if (options.forcedLoginMethod) {
+      codexConfig.splice(1, 0, `forced_login_method="${options.forcedLoginMethod}"`);
+    } else if (!options.preserveCodexAuth) {
+      codexConfig.splice(1, 0, codexLoginConfig());
+    }
     if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
     for (let attempt = 1; attempt <= passAttempts; attempt += 1) {
       if (existsSync(outputPath)) unlinkSync(outputPath);
@@ -7150,8 +7523,12 @@ function runCodex(options: {
         ],
         cwd: options.openclawDir,
         env: {
-          ...codexEnv({ ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN }),
+          ...codexEnv({
+            ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
+            preserveCodexAuth: options.preserveCodexAuth,
+          }),
           CLAWSWEEPER_PROOF_SCRATCH_DIR: proofScratchDir,
+          ...(options.preferWindowsAppBinary ? { CLAWSWEEPER_PREFER_WINDOWS_CODEX_APP: "1" } : {}),
         },
         input: prompt,
         stderrPath: join(options.workDir, `${options.item.number}.${attempt}.codex.stderr.log`),
@@ -7179,11 +7556,13 @@ function runCodex(options: {
             options.item,
           );
           if (result.status !== 0) {
-            console.error(
-              `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
-                options.item.number
-              } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
-            );
+            if (!options.quietLogs) {
+              console.error(
+                `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
+                  options.item.number
+                } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
+              );
+            }
           }
           return decision;
         } catch (error) {
@@ -7214,11 +7593,13 @@ function runCodex(options: {
       if (retryable && attempt < passAttempts) {
         const delayMs = codexRetryDelayMs(processFailureDetail, attempt);
         if (Date.now() - startedAt + delayMs < options.timeoutMs) {
-          console.error(
-            `[review] ${new Date().toISOString()} codex-retry #${options.item.number} attempt=${
-              attempt + 1
-            }/${passAttempts} delay_ms=${delayMs} reason=transient_transport`,
-          );
+          if (!options.quietLogs) {
+            console.error(
+              `[review] ${new Date().toISOString()} codex-retry #${options.item.number} attempt=${
+                attempt + 1
+              }/${passAttempts} delay_ms=${delayMs} reason=transient_transport`,
+            );
+          }
           sleepMs(delayMs);
           continue;
         }
@@ -7247,9 +7628,11 @@ function runCodex(options: {
     const fallbackEffort = lowerCodexReasoningEffort(options.reasoningEffort);
     const remainingMs = options.timeoutMs - (Date.now() - startedAt);
     if (fallbackEffort === null || remainingMs < codexFallbackMinBudgetMs()) throw error;
-    console.error(
-      `[review] ${new Date().toISOString()} codex-fallback #${options.item.number} reason=transient_transport from_effort=${options.reasoningEffort} to_effort=${fallbackEffort} remaining_ms=${remainingMs}`,
-    );
+    if (!options.quietLogs) {
+      console.error(
+        `[review] ${new Date().toISOString()} codex-fallback #${options.item.number} reason=transient_transport from_effort=${options.reasoningEffort} to_effort=${fallbackEffort} remaining_ms=${remainingMs}`,
+      );
+    }
     try {
       const decision = runReviewPass(fallbackEffort, 1);
       return annotateDegradedReview(decision, {
@@ -7621,6 +8004,10 @@ function closeReasonText(reason: CloseReason): string {
       return "duplicate or superseded";
     case "low_signal_unmergeable_pr":
       return "low-signal unmergeable PR";
+    case "stalled_unproven_pr":
+      return "stalled PR without requested real-behavior proof";
+    case "abandoned_pr":
+      return "abandoned inactive PR";
     case "unconfirmed_product_direction":
       return "feature-like PR without confirmed product direction";
     case "not_actionable_in_repo":
@@ -7877,6 +8264,7 @@ function readSweepStatusSummary(profile = targetProfile()): WorkflowStatusSummar
       state: stringOrUndefined(parsed.state) ?? "Idle",
       detail: stringOrUndefined(parsed.detail) ?? "No workflow status has been published yet.",
       runUrl: stringOrUndefined(parsed.run_url),
+      applyHealth: recordOrUndefined(parsed.apply_health),
       plannedCount: numberOrUndefined(parsed.planned_count),
       plannedCapacity: numberOrUndefined(parsed.planned_capacity),
       plannedShards: numberOrUndefined(parsed.planned_shards),
@@ -7905,6 +8293,12 @@ function stringOrUndefined(value: unknown): string | undefined {
 function numberOrUndefined(value: unknown): number | undefined {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+function recordOrUndefined(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function currentWorkflowStatusBlock(readme: string, profile = targetProfile()): string {
@@ -7964,6 +8358,7 @@ function workflowStatusSummary(block: string): WorkflowStatusSummary {
     state,
     detail,
     runUrl,
+    applyHealth: undefined,
     plannedCount: numberOrUndefined(planMatch?.[1]),
     plannedShards: numberOrUndefined(planMatch?.[2]),
     plannedCapacity: numberOrUndefined(planMatch?.[3]),
@@ -8432,6 +8827,9 @@ function reviewFindingDetailedLine(finding: ReviewFinding): string {
     reviewFindingSummaryLine(finding),
     `  ${sentence(finding.body)}`,
     `  Confidence: ${confidenceText(finding.confidenceScore)}`,
+    ...(finding.lateFinding
+      ? ["  Late finding: first raised on code an earlier review cycle already covered."]
+      : []),
   ].join("\n");
 }
 
@@ -8650,6 +9048,10 @@ function closeIntro(reason: CloseReason): string {
       return "Thanks for the context here. I swept through the related work, and this is now duplicate or superseded.";
     case "low_signal_unmergeable_pr":
       return "Thanks for the contribution. I reviewed the branch, and this PR is not a good landing base for OpenClaw.";
+    case "stalled_unproven_pr":
+      return "Thanks for the contribution. This PR still needs the requested real-behavior proof, and the branch has been idle since that ask.";
+    case "abandoned_pr":
+      return "Thanks for the contribution. This PR has been inactive for a while and still is not in a landable state.";
     case "unconfirmed_product_direction":
       return "Thanks for the contribution. ClawSweeper proposes closing this for now: the implementation may be reasonable, but passing review and proof does not establish that OpenClaw should add this product surface.";
     case "not_actionable_in_repo":
@@ -8677,6 +9079,10 @@ function closeOutro(reason: CloseReason, canonicalLinks: string[] = []): string 
         : "So I’m closing this here because the remaining work is already tracked in the canonical issue.";
     case "low_signal_unmergeable_pr":
       return "So I’m closing this PR rather than keeping an unmergeable branch open. A new narrow PR that carries only the useful part is welcome.";
+    case "stalled_unproven_pr":
+      return "So I’m closing this for now to keep the review queue honest. Please reopen or open a fresh PR with real-behavior proof (a live run, logs, or a reproducible validation transcript) and it will be reviewed again.";
+    case "abandoned_pr":
+      return "So I’m closing this as inactive for now. If you pick the work back up, push a rebased branch with green checks and reopen (or open a fresh PR) and it will be reviewed again.";
     case "unconfirmed_product_direction":
       return "This is a proposal only until the separate default-off apply policy is enabled and all live maintainer-signal checks pass. A maintainer can sponsor the direction, request a narrower version, or apply `clawsweeper:human-review` to keep it open.";
     case "not_actionable_in_repo":
@@ -8907,6 +9313,12 @@ function mergeRiskLabelsFromReport(markdown: string): MergeRiskLabelName[] {
   );
 }
 
+function maturityLabelsFromReport(markdown: string): MaturityLabelName[] {
+  return frontMatterStringArray(markdown, "maturity_labels").filter(
+    (label): label is MaturityLabelName => MATURITY_LABEL_NAMES.has(label),
+  );
+}
+
 function mergeRiskOptionsFromReport(markdown: string): MergeRiskOption[] {
   return frontMatterJsonArray(markdown, "merge_risk_options")
     .map((entry, index) => {
@@ -8921,7 +9333,7 @@ function mergeRiskOptionsFromReport(markdown: string): MergeRiskOption[] {
 
 function labelJustificationsFromReport(
   markdown: string,
-  labels: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels">,
+  labels: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels">,
 ): LabelJustification[] {
   const selected = new Set<string>(selectedReviewLabels(labels));
   const fromFrontMatter = frontMatterJsonArray(markdown, "label_justifications")
@@ -8966,6 +9378,11 @@ function reportReviewFindings(markdown: string): ReviewFinding[] {
     const body = line.match(/^\s+- body: (.*)$/);
     if (body?.[1]) {
       current.body = body[1];
+      continue;
+    }
+    const late = line.match(/^\s+- late: (true|false)$/);
+    if (late?.[1]) {
+      current.lateFinding = late[1] === "true";
       continue;
     }
     const confidence = line.match(/^\s+- confidence: ([0-9.]+)$/);
@@ -10543,6 +10960,36 @@ export function impactLabelsForTest(
   );
 }
 
+function nextMaturityLabels(
+  labels: readonly string[],
+  maturityLabels: readonly MaturityLabelName[],
+): string[] {
+  const nextLabels = labels.filter((label) => !MATURITY_LABEL_NAMES.has(label));
+  const uniqueMaturityLabels = new Set(maturityLabels);
+  for (const label of MATURITY_LABELS) {
+    if (uniqueMaturityLabels.has(label.name)) nextLabels.push(label.name);
+  }
+  return nextLabels;
+}
+
+export function maturityLabelSchemeForTest(): {
+  name: string;
+  color: string;
+  description: string;
+}[] {
+  return MATURITY_LABELS.map(({ name, color, description }) => ({ name, color, description }));
+}
+
+export function maturityLabelsForTest(
+  labels: readonly string[],
+  maturityLabels: readonly string[],
+): string[] {
+  return nextMaturityLabels(
+    labels,
+    maturityLabels.filter((label): label is MaturityLabelName => MATURITY_LABEL_NAMES.has(label)),
+  );
+}
+
 function nextMergeRiskLabels(
   labels: readonly string[],
   mergeRiskLabels: readonly MergeRiskLabelName[],
@@ -10847,6 +11294,28 @@ function ensureIssueAdvisorySyncLabel(name: string): void {
   }
 }
 
+function ensureMaturityLabel(name: MaturityLabelName): void {
+  const definition = MATURITY_LABELS.find((label) => label.name === name);
+  if (!definition) return;
+  try {
+    ghWithRetry(
+      [
+        "label",
+        "create",
+        definition.name,
+        "--color",
+        definition.color,
+        "--description",
+        definition.description,
+      ],
+      2,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/already exists/i.test(message)) throw error;
+  }
+}
+
 function syncPriorityLabel(options: {
   number: number;
   labels: readonly string[];
@@ -10908,6 +11377,40 @@ function syncImpactLabels(options: {
   let added = false;
   for (const label of labelsToAdd) {
     ensureImpactLabel(label);
+    if (tryAddOptionalLabel({ number: options.number, label, currentLabels: syncedLabels })) {
+      syncedLabels.push(label);
+      added = true;
+    }
+  }
+  return { labels: syncedLabels, changed: labelsToRemove.length > 0 || added };
+}
+
+function syncMaturityLabels(options: {
+  number: number;
+  labels: readonly string[];
+  maturityLabels: readonly MaturityLabelName[];
+  dryRun: boolean;
+}): { labels: string[]; changed: boolean } {
+  const nextLabels = nextMaturityLabels(options.labels, options.maturityLabels);
+  const currentLabelKeys = new Set(options.labels.map((label) => label.toLowerCase()));
+  const nextLabelKeys = new Set(nextLabels.map((label) => label.toLowerCase()));
+  const labelsToAdd = nextLabels.filter(
+    (label): label is MaturityLabelName =>
+      MATURITY_LABEL_NAMES.has(label) && !currentLabelKeys.has(label.toLowerCase()),
+  );
+  const labelsToRemove = options.labels.filter(
+    (label) => MATURITY_LABEL_NAMES.has(label) && !nextLabelKeys.has(label.toLowerCase()),
+  );
+  const changed = labelsToAdd.length > 0 || labelsToRemove.length > 0;
+  if (!changed) return { labels: nextLabels, changed };
+  if (options.dryRun) return { labels: nextLabels, changed };
+  for (const label of labelsToRemove) {
+    ghWithRetry(["issue", "edit", String(options.number), "--remove-label", label]);
+  }
+  const syncedLabels = options.labels.filter((label) => !labelsToRemove.includes(label));
+  let added = false;
+  for (const label of labelsToAdd) {
+    ensureMaturityLabel(label);
     if (tryAddOptionalLabel({ number: options.number, label, currentLabels: syncedLabels })) {
       syncedLabels.push(label);
       added = true;
@@ -12123,6 +12626,7 @@ function reportDecision(markdown: string, closeReason: CloseReason): Decision {
   const triagePriority = triagePriorityFromReport(markdown);
   const impactLabels = kind === "pull_request" ? [] : impactLabelsFromReport(markdown);
   const mergeRiskLabels = mergeRiskLabelsFromReport(markdown);
+  const maturityLabels = kind === "pull_request" ? [] : maturityLabelsFromReport(markdown);
   const visionFit = reportVisionFit(markdown);
   return {
     decision: "close",
@@ -12137,12 +12641,14 @@ function reportDecision(markdown: string, closeReason: CloseReason): Decision {
     triagePriority,
     impactLabels,
     mergeRiskLabels,
+    maturityLabels,
     mergeRiskOptions: mergeRiskOptionsFromReport(markdown),
     reviewMetrics: reviewMetricsFromReport(markdown),
     labelJustifications: labelJustificationsFromReport(markdown, {
       triagePriority,
       impactLabels,
       mergeRiskLabels,
+      maturityLabels,
     }),
     itemCategory:
       (frontMatterValue(markdown, "item_category") as ItemCategory | undefined) ?? "unclear",
@@ -12268,6 +12774,11 @@ function upgradePullRequestClosePromotionReport(
     upgraded,
     "item_snapshot_hash",
     itemSnapshotHash(item, context),
+  );
+  upgraded = replaceFrontMatterValue(
+    upgraded,
+    "item_source_revision",
+    context.sourceRevision ?? "unknown",
   );
   upgraded = replaceSectionValue(upgraded, REVIEW_SECTIONS.bestSolution, promotion.bestSolution);
   upgraded = replaceSectionValue(upgraded, REVIEW_SECTIONS.evidence, promotion.evidence);
@@ -12853,11 +13364,12 @@ function coveringPrCloseCoveragePullRequestView(
 ): PrCloseCoverageProofPullRequestView {
   const pull = asRecord(ghJson<unknown>(["api", `repos/${targetRepo()}/pulls/${number}`]));
   const issue = asRecord(ghJson<unknown>(["api", `repos/${targetRepo()}/issues/${number}`]));
-  const commentsWindow = ghPagedContextWindow<unknown>(
-    `repos/${targetRepo()}/issues/${number}/comments`,
-    numberOrUndefined(issue.comments),
-    40,
-  );
+  const commentsPath = `repos/${targetRepo()}/issues/${number}/comments`;
+  const commentsCount = numberOrUndefined(issue.comments);
+  const commentsWindow =
+    commentsCount === undefined
+      ? ghPagedLinkHeaderContextWindow<unknown>(commentsPath, 40)
+      : ghPagedContextWindow<unknown>(commentsPath, commentsCount, 40);
   const filteredComments = filterReviewContextComments(commentsWindow.items, number);
   return {
     number,
@@ -12914,13 +13426,21 @@ function prCloseCoverageProofGateResult(options: {
   if (candidateRefs.length === 0) return null;
 
   const source = sourcePrCloseCoveragePullRequestView(options.item, options.context);
+  const coveringViews = new Map<number, PrCloseCoverageProofPullRequestView>();
+  const coveringView = (number: number): PrCloseCoverageProofPullRequestView => {
+    const cached = coveringViews.get(number);
+    if (cached) return cached;
+    const view = coveringPrCloseCoveragePullRequestView(number);
+    coveringViews.set(number, view);
+    return view;
+  };
   let firstKeepOpenBlock: PrCloseCoverageProofGateBlock | null = null;
   let checkedPullRequestCandidate = false;
   for (const candidateRef of candidateRefs) {
     const linkedNumber = candidateRef.number;
     let covering: PrCloseCoverageProofPullRequestView;
     try {
-      covering = coveringPrCloseCoveragePullRequestView(linkedNumber);
+      covering = coveringView(linkedNumber);
     } catch (error) {
       if (candidateRef.kind !== "pull_url" && shorthandRefIsIssue(linkedNumber)) continue;
       return {
@@ -13201,6 +13721,7 @@ function isClawSweeperOwnedLabel(label: string): boolean {
     PRIORITY_LABEL_NAMES.has(label) ||
     IMPACT_LABEL_NAMES.has(label) ||
     MERGE_RISK_LABEL_NAMES.has(label) ||
+    MATURITY_LABEL_NAMES.has(label) ||
     PR_RATING_LABEL_NAMES.has(label) ||
     PR_STATUS_LABEL_NAMES.has(label) ||
     label === FEATURE_SHOWCASE_LABEL ||
@@ -13220,6 +13741,7 @@ function desiredClawSweeperLabelsFromPublicReport(
   const reviewFailed = frontMatterValue(markdown, "review_status") === "failed";
   let labels = nextPriorityLabels(currentLabels, triagePriorityFromReport(markdown));
   labels = nextImpactLabels(labels, isPullRequest ? [] : impactLabelsFromReport(markdown));
+  labels = nextMaturityLabels(labels, isPullRequest ? [] : maturityLabelsFromReport(markdown));
   if (isPullRequest) {
     const realBehaviorProof = reportRealBehaviorProof(markdown);
     labels = nextMergeRiskLabels(labels, mergeRiskLabelsFromReport(markdown));
@@ -13288,6 +13810,14 @@ function labelTransitionReason(
       : labels.length
         ? `Current PR review merge-risk labels are ${labels.map(inlineCode).join(", ")}.`
         : "Current PR review selected no merge-risk labels.";
+  }
+  if (MATURITY_LABEL_NAMES.has(label)) {
+    const labels = maturityLabelsFromReport(markdown);
+    return action === "add"
+      ? "Current issue review matched this item to a stable maturity scorecard feature."
+      : labels.length
+        ? `Current issue maturity labels are ${labels.map(inlineCode).join(", ")}.`
+        : "Current issue review selected no maturity labels.";
   }
   if (PR_RATING_LABEL_NAMES.has(label)) {
     if (frontMatterValue(markdown, "review_status") === "failed") {
@@ -13384,6 +13914,7 @@ function labelJustificationsFromPublicReport(
     triagePriority: triagePriorityFromReport(markdown),
     impactLabels: impactLabelsFromReport(markdown),
     mergeRiskLabels: mergeRiskLabelsFromReport(markdown),
+    maturityLabels: maturityLabelsFromReport(markdown),
   });
   const byLabel = new Map(justifications.map((entry) => [entry.label, entry]));
   const add = (label: string | null | undefined, reason: string): void => {
@@ -13820,28 +14351,30 @@ function renderCloseComment(options: {
 }
 
 function renderCloseCommentFromReport(markdown: string, reason: CloseReason): string {
-  return sanitizePublicSelfReferences(
-    renderCloseComment({
-      reason,
-      summary: reviewSectionValue(markdown, "summary"),
-      bestSolution: reviewSectionValue(markdown, "bestSolution"),
-      reproductionAssessment: reviewSectionValue(markdown, "reproductionAssessment"),
-      solutionAssessment: reviewSectionValue(markdown, "solutionAssessment"),
-      agentsPolicyStatus: reportAgentsPolicyStatus(markdown),
-      evidence: reportEvidence(markdown),
-      likelyOwners: reportLikelyOwners(markdown),
-      fixedPullRequest: fixedPullRequestFromReport(markdown),
-      securityReview: reportSecurityReview(markdown),
-      rootCauseCluster: reportRootCauseCluster(markdown),
-      reviewLine: closeReviewLineFromReport(markdown),
-      currentItem: {
-        repo: markdownRepository(markdown),
-        number: Number(frontMatterValue(markdown, "number")),
-        kind: (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
-      },
-    }),
-    Number(frontMatterValue(markdown, "number")),
-    (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+  return neutralizeReviewControlMarkers(
+    sanitizePublicSelfReferences(
+      renderCloseComment({
+        reason,
+        summary: reviewSectionValue(markdown, "summary"),
+        bestSolution: reviewSectionValue(markdown, "bestSolution"),
+        reproductionAssessment: reviewSectionValue(markdown, "reproductionAssessment"),
+        solutionAssessment: reviewSectionValue(markdown, "solutionAssessment"),
+        agentsPolicyStatus: reportAgentsPolicyStatus(markdown),
+        evidence: reportEvidence(markdown),
+        likelyOwners: reportLikelyOwners(markdown),
+        fixedPullRequest: fixedPullRequestFromReport(markdown),
+        securityReview: reportSecurityReview(markdown),
+        rootCauseCluster: reportRootCauseCluster(markdown),
+        reviewLine: closeReviewLineFromReport(markdown),
+        currentItem: {
+          repo: markdownRepository(markdown),
+          number: Number(frontMatterValue(markdown, "number")),
+          kind: (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+        },
+      }),
+      Number(frontMatterValue(markdown, "number")),
+      (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+    ),
   );
 }
 
@@ -14155,6 +14688,31 @@ function reviewFreshnessText(markdown: string): string {
   return timestamp ? ` _Reviewed ${timestamp}._` : "";
 }
 
+function reviewHistoryForRender(
+  markdown: string,
+  previousReviewCommentBody: string | undefined,
+): ReviewHistoryLedger {
+  if (frontMatterValue(markdown, "type") !== "pull_request") {
+    return { cycles: [], totalCompletedCycles: 0 };
+  }
+  const body = previousReviewCommentBody ?? "";
+  if (!body.trim()) return { cycles: [], totalCompletedCycles: 0 };
+  const history = parseReviewHistory(body);
+  const previousCycle = reviewHistoryCycleFromCommentBody(body);
+  if (!previousCycle) return history;
+  const reviewedAt = frontMatterValue(markdown, "reviewed_at");
+  if (reviewedAt && previousCycle.reviewedAt === reviewedAt) return history;
+  return appendReviewHistoryCycle(history, previousCycle);
+}
+
+function reviewHistoryForStaleComment(
+  previousReviewCommentBody: string | undefined,
+): ReviewHistoryLedger {
+  const body = previousReviewCommentBody ?? "";
+  const history = parseReviewHistory(body);
+  return appendReviewHistoryCycle(history, reviewHistoryCycleFromCommentBody(body));
+}
+
 function renderKeepOpenCommentFromReport(
   markdown: string,
   options: ReviewCommentRenderOptions = {},
@@ -14367,13 +14925,19 @@ function renderKeepOpenCommentFromReport(
   if (labelDetailsBlock) lines.push("", labelDetailsBlock);
   const evidenceDetailsBlock = collapsedDetailsBlock("Evidence reviewed", evidenceDetails);
   if (evidenceDetailsBlock) lines.push("", evidenceDetailsBlock);
+  const reviewHistoryBlock = renderReviewHistorySection(
+    reviewHistoryForRender(markdown, options.previousReviewCommentBody),
+  );
   if (isPullRequest && !reviewFailed) lines.push("", publicRankDetailsBlock());
   lines.push("", ...reviewWorkflowCallout());
-  return sanitizePublicSelfReferences(
-    lines.join("\n"),
-    Number(frontMatterValue(markdown, "number")),
-    (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+  const publicBody = neutralizeReviewControlMarkers(
+    sanitizePublicSelfReferences(
+      lines.join("\n"),
+      Number(frontMatterValue(markdown, "number")),
+      (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+    ),
   );
+  return reviewHistoryBlock ? `${publicBody.trimEnd()}\n\n${reviewHistoryBlock}\n` : publicBody;
 }
 
 export function renderReviewCommentFromReport(
@@ -14455,7 +15019,7 @@ function unconfirmedProductDirectionDecisionBlockReason(
   }
   const exemptLabel = item.labels
     .map(normalizeLabelName)
-    .find((label) => UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS.has(label));
+    .find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
   if (exemptLabel) return `${exemptLabel} exempts this PR from product-direction auto-close`;
   if (decision.itemCategory !== "feature") {
     return "unconfirmed_product_direction requires feature item category";
@@ -14477,6 +15041,64 @@ function unconfirmedProductDirectionDecisionBlockReason(
   }
   if (!["S", "A", "B", "C"].includes(decision.prRating.overallTier)) {
     return "unconfirmed_product_direction requires a quality-ready PR rating";
+  }
+  return null;
+}
+
+const STALLED_UNPROVEN_PROOF_STATUSES = new Set(["missing", "mock_only", "insufficient"]);
+const STALLED_UNPROVEN_RATING_TIERS = new Set(["D", "F"]);
+
+function externalPrCloseDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  closeReason: CloseReason,
+  exemptText: string,
+): string | null {
+  if (item.kind !== "pull_request") {
+    return `${closeReason} is allowed only for pull requests`;
+  }
+  if (!item.authorAssociation) return `${closeReason} requires author association`;
+  if (isMaintainerAuthorAssociation(item.authorAssociation)) {
+    return `${closeReason} cannot close maintainer-authored pull requests`;
+  }
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from ${exemptText}`;
+  return null;
+}
+
+function stalledUnprovenPrDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  decision: Decision,
+): string | null {
+  const externalBlock = externalPrCloseDecisionBlockReason(
+    item,
+    "stalled_unproven_pr",
+    "stalled-unproven auto-close",
+  );
+  if (externalBlock) return externalBlock;
+  if (!STALLED_UNPROVEN_PROOF_STATUSES.has(decision.realBehaviorProof.status)) {
+    return "stalled_unproven_pr requires missing, mock-only, or insufficient real behavior proof";
+  }
+  if (!STALLED_UNPROVEN_RATING_TIERS.has(decision.prRating.overallTier)) {
+    return "stalled_unproven_pr requires a D or F overall PR rating";
+  }
+  return null;
+}
+
+function abandonedPrDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  decision: Decision,
+): string | null {
+  const externalBlock = externalPrCloseDecisionBlockReason(
+    item,
+    "abandoned_pr",
+    "abandoned-PR auto-close",
+  );
+  if (externalBlock) return externalBlock;
+  if (
+    ["S", "A", "B"].includes(decision.prRating.overallTier) &&
+    ["sufficient", "override"].includes(decision.realBehaviorProof.status)
+  ) {
+    return "abandoned_pr cannot close a high-quality proven pull request";
   }
   return null;
 }
@@ -14537,6 +15159,26 @@ export function validateCloseDecision(
         ok: false,
         actionTaken: "skipped_invalid_decision",
         reason: productDirectionBlock,
+      };
+    }
+  }
+  if (decision.closeReason === "stalled_unproven_pr") {
+    const stalledUnprovenBlock = stalledUnprovenPrDecisionBlockReason(item, decision);
+    if (stalledUnprovenBlock) {
+      return {
+        ok: false,
+        actionTaken: "skipped_invalid_decision",
+        reason: stalledUnprovenBlock,
+      };
+    }
+  }
+  if (decision.closeReason === "abandoned_pr") {
+    const abandonedBlock = abandonedPrDecisionBlockReason(item, decision);
+    if (abandonedBlock) {
+      return {
+        ok: false,
+        actionTaken: "skipped_invalid_decision",
+        reason: abandonedBlock,
       };
     }
   }
@@ -14653,6 +15295,88 @@ function pullHeadShaFromReport(markdown: string): string | null {
   return value && value !== "unknown" ? value : null;
 }
 
+type StalePullRequestReviewHead = {
+  reportHeadSha: string;
+  liveHeadSha: string;
+  reason: string;
+};
+
+function stalePullRequestReviewHead(
+  markdown: string,
+  context: ItemContext,
+): StalePullRequestReviewHead | null {
+  if (frontMatterValue(markdown, "type") !== "pull_request") return null;
+  const reportHeadSha = pullHeadShaFromReport(markdown);
+  const liveHeadSha = pullHeadShaFromContext(context);
+  if (!reportHeadSha || !liveHeadSha || reportHeadSha === liveHeadSha) return null;
+  return {
+    reportHeadSha,
+    liveHeadSha,
+    reason: `live PR head ${liveHeadSha} differs from reviewed head ${reportHeadSha}`,
+  };
+}
+
+function freshPullRequestReviewHead(markdown: string, context: ItemContext): boolean {
+  if (frontMatterValue(markdown, "type") !== "pull_request") return false;
+  const reportHeadSha = pullHeadShaFromReport(markdown);
+  const liveHeadSha = pullHeadShaFromContext(context);
+  return Boolean(reportHeadSha && liveHeadSha && reportHeadSha === liveHeadSha);
+}
+
+function isStalePullRequestReviewLabel(label: string): boolean {
+  return (
+    isClawSweeperOwnedLabel(label) &&
+    !PRIORITY_LABEL_NAMES.has(label) &&
+    !IMPACT_LABEL_NAMES.has(label) &&
+    !MATURITY_LABEL_NAMES.has(label) &&
+    !isIssueAdvisoryLabel(label)
+  );
+}
+
+function syncStalePullRequestReviewLabels(options: {
+  number: number;
+  labels: readonly string[];
+  dryRun: boolean;
+}): { labels: string[]; changed: boolean } {
+  const labelsToRemove = options.labels.filter(isStalePullRequestReviewLabel);
+  if (labelsToRemove.length === 0) return { labels: [...options.labels], changed: false };
+  const nextLabels = options.labels.filter((label) => !labelsToRemove.includes(label));
+  if (!options.dryRun) {
+    for (const label of labelsToRemove) {
+      ghWithRetry(["issue", "edit", String(options.number), "--remove-label", label]);
+    }
+  }
+  return { labels: nextLabels, changed: true };
+}
+
+function stalePullRequestReviewComment(options: {
+  number: number;
+  stale: StalePullRequestReviewHead;
+  previousReviewCommentBody?: string;
+}): string {
+  const attrs = [
+    `item=${markerAttributeValue(String(options.number))}`,
+    `reviewed_sha=${markerAttributeValue(options.stale.reportHeadSha)}`,
+    `current_sha=${markerAttributeValue(options.stale.liveHeadSha)}`,
+    "reason=stale_head",
+  ].join(" ");
+  const history = renderReviewHistorySection(
+    reviewHistoryForStaleComment(options.previousReviewCommentBody),
+  );
+  return [
+    "Codex review: stale review; fresh review needed.",
+    "",
+    "**Summary**",
+    `The latest durable ClawSweeper review was for head \`${options.stale.reportHeadSha}\`, but the PR head is now \`${options.stale.liveHeadSha}\`. Its old verdict and PR readiness labels are no longer current.`,
+    "",
+    "**Next step**",
+    "Run or wait for a fresh ClawSweeper review on the current PR head.",
+    ...(history ? ["", history] : []),
+    "",
+    `<!-- clawsweeper-review-status:stale ${attrs} -->`,
+  ].join("\n");
+}
+
 function markerAttributeValue(value: string): string {
   return value.trim().replace(/[^\w./:@-]/g, "_") || "unknown";
 }
@@ -14664,10 +15388,16 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   const decision = frontMatterValue(markdown, "decision");
   const confidence = frontMatterValue(markdown, "confidence") ?? "unknown";
   const headSha = pullHeadShaFromReport(markdown) ?? "unknown";
+  const itemUpdatedAt = frontMatterValue(markdown, "item_updated_at") ?? "unknown";
+  const reviewedAt = frontMatterValue(markdown, "reviewed_at") ?? "unknown";
+  const sourceRevision = frontMatterValue(markdown, "item_source_revision") ?? "unknown";
   const baseAttrs = [
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
+    `updated_at=${markerAttributeValue(itemUpdatedAt)}`,
+    `reviewed_at=${markerAttributeValue(reviewedAt)}`,
+    `source_revision=${markerAttributeValue(sourceRevision)}`,
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
   const humanReviewMarkers = (): string => {
@@ -14726,7 +15456,13 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     ].join("\n");
   }
   if (decision === "close") {
-    return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
+    const closeReason = frontMatterValue(markdown, "close_reason") ?? "unknown";
+    const actionTaken = frontMatterValue(markdown, "action_taken") ?? "unknown";
+    const closeAttrs = `${baseAttrs} action_taken=${markerAttributeValue(actionTaken)} reason=${markerAttributeValue(closeReason)}`;
+    return [
+      `<!-- clawsweeper-verdict:close ${closeAttrs} -->`,
+      `<!-- clawsweeper-action:close-required ${closeAttrs} -->`,
+    ].join("\n");
   }
   return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
 }
@@ -14853,6 +15589,19 @@ function issueReviewComment(
   return codexComments.find(canPatchReviewComment) ?? codexComments[0];
 }
 
+function issueReviewCommentWithBody(
+  number: number,
+  body: string,
+): Record<string, unknown> | undefined {
+  const expected = body.trim();
+  if (!expected) return undefined;
+  const comments = ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/comments`).map(
+    asRecord,
+  );
+  const exactComments = comments.filter((candidate) => commentBody(candidate)?.trim() === expected);
+  return exactComments.find(canPatchReviewComment) ?? exactComments[0];
+}
+
 function commentUpdatedAt(comment: Record<string, unknown> | undefined): string | undefined {
   const updatedAt = comment?.updated_at;
   if (typeof updatedAt === "string") return updatedAt;
@@ -14875,8 +15624,100 @@ function commentBody(comment: Record<string, unknown> | undefined): string | und
   return typeof body === "string" ? body : undefined;
 }
 
-function commentBodyMatches(comment: Record<string, unknown> | undefined, body: string): boolean {
-  return commentBody(comment)?.trim() === body.trim();
+function newestReviewMarkerReviewedAt(
+  comment: Record<string, unknown> | undefined,
+  number: number,
+): string | undefined {
+  if (!canPatchReviewComment(comment)) return undefined;
+  const body = commentBody(comment);
+  if (!body) return undefined;
+  const reviewMarker = reviewCommentMarker(number);
+  const reviewMarkerIndex = body.lastIndexOf(reviewMarker);
+  if (reviewMarkerIndex < 0) return undefined;
+  if (body.slice(reviewMarkerIndex + reviewMarker.length).trim() !== "") return undefined;
+  const markerBlock = body
+    .slice(0, reviewMarkerIndex)
+    .trimEnd()
+    .match(/(?:<!--[\s\S]*?-->\s*)+$/)?.[0];
+  if (!markerBlock) return undefined;
+  const markerPattern = /<!--\s+clawsweeper-verdict:[^\s>]+\b([^>]*)-->/g;
+  let lastReviewedAt: string | undefined;
+  for (const match of markerBlock.matchAll(markerPattern)) {
+    const attributes = match[1] ?? "";
+    if (!new RegExp(`\\bitem=${number}\\b`).test(attributes)) continue;
+    const reviewedAt = attributes.match(/\breviewed_at=([^\s>]+)/)?.[1];
+    if (!reviewedAt || reviewedAt === "unknown") continue;
+    lastReviewedAt = reviewedAt;
+  }
+  return lastReviewedAt;
+}
+
+function staleReviewCommentSyncReason(
+  markdown: string,
+  existingReviewComment: Record<string, unknown> | undefined,
+  number: number,
+): string | null {
+  if (frontMatterValue(markdown, "type") !== "pull_request") return null;
+  // Comment updated_at can move for command/status edits; only review markers prove verdict freshness.
+  const liveReviewedAt = newestReviewMarkerReviewedAt(existingReviewComment, number);
+  const reportReviewedAt = frontMatterValue(markdown, "reviewed_at");
+  const liveReviewedAtMs = timestampMs(liveReviewedAt);
+  const reportReviewedAtMs = timestampMs(reportReviewedAt);
+  if (liveReviewedAtMs === null || reportReviewedAtMs === null) return null;
+  if (liveReviewedAtMs <= reportReviewedAtMs) return null;
+  return `live durable review comment is newer than the local report: comment reviewed_at=${liveReviewedAt}, report reviewed_at=${reportReviewedAt}`;
+}
+
+const APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS = new Set([
+  "proposed_close",
+  "kept_open",
+  "skipped_pr_close_coverage_proof",
+  "retry_pr_close_coverage_proof",
+  ...RETRYABLE_CLOSE_SKIP_ACTIONS,
+  ...PAIR_BLOCKED_CLOSE_ACTIONS,
+]);
+
+function normalizeApplySyncCloseMarkerAction(body: string): string {
+  return body.replace(
+    /(<!-- clawsweeper-(?:verdict:close|action:close-required)\b[^>]*\s)action_taken=([^\s>]+)(?=\s|-->)/g,
+    (match, prefix: string, action: string) =>
+      APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS.has(action)
+        ? `${prefix}action_taken=proposed_close`
+        : match,
+  );
+}
+
+function commentBodyMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  const actual = commentBody(comment)?.trim();
+  const expected = body.trim();
+  if (actual === expected) return true;
+  if (!actual || !options.allowApplyCloseActionUpgrade) return false;
+  return (
+    normalizeApplySyncCloseMarkerAction(actual) === normalizeApplySyncCloseMarkerAction(expected)
+  );
+}
+
+function reviewCommentHashMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  storedHash: string | undefined,
+  expectedHash: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  if (storedHash === expectedHash) return true;
+  if (!storedHash || !options.allowApplyCloseActionUpgrade) return false;
+  const actual = commentBody(comment)?.trim();
+  if (!actual) return false;
+  if (
+    normalizeApplySyncCloseMarkerAction(actual) !== normalizeApplySyncCloseMarkerAction(body.trim())
+  ) {
+    return false;
+  }
+  return storedHash === sha256(actual);
 }
 
 const PATCHABLE_REVIEW_COMMENT_AUTHORS = new Set(
@@ -14954,26 +15795,50 @@ function upsertReviewComment(
   const markedBody = markedReviewCommentBody(number, body);
   const id = commentId(existing);
   const payload = writeCommentPayload(number, markedBody);
+  let args: string[];
   if (id !== null && canPatchReviewComment(existing)) {
-    ghWithRetry([
+    args = [
       "api",
       `repos/${targetRepo()}/issues/comments/${id}`,
       "--method",
       "PATCH",
       "--input",
       payload,
-    ]);
+    ];
   } else {
-    ghWithRetry([
+    args = [
       "api",
       `repos/${targetRepo()}/issues/${number}/comments`,
       "--method",
       "POST",
       "--input",
       payload,
-    ]);
+    ];
   }
-  return issueReviewComment(number, [markedBody]);
+  const response = ghWithRetry(args);
+  const written = reviewCommentFromMutationResponse(response, args);
+  if (written) return written;
+  const fallback = issueReviewCommentWithBody(number, markedBody);
+  if (fallback) return fallback;
+  throw new Error(
+    `GitHub comment mutation for #${number} did not return or expose the synced review comment`,
+  );
+}
+
+function reviewCommentFromMutationResponse(
+  response: string,
+  args: readonly string[],
+): Record<string, unknown> | undefined {
+  if (!response.trim()) return undefined;
+  try {
+    const comment = asRecord(parseGhJson<unknown>(response, args));
+    if (commentId(comment) !== null || commentUrl(comment)) {
+      return comment;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 function issueCommentWithMarker(
@@ -15213,6 +16078,7 @@ function renderReviewFindingsReportSection(decision: Decision): string {
             finding,
           )}\``,
           `  - body: ${sentence(finding.body)}`,
+          ...(finding.lateFinding ? ["  - late: true"] : []),
           `  - confidence: ${confidenceText(finding.confidenceScore)}`,
         ].join("\n"),
       )
@@ -15480,6 +16346,7 @@ review_status: ${options.decision.summary.startsWith("Codex review failed") ? "f
 review_terminal_failure: ${options.decision.codexTerminalFailure === true}
 local_checkout_access: verified
 item_snapshot_hash: ${options.snapshotHash}
+item_source_revision: ${options.context.sourceRevision ?? "unknown"}
 close_comment_sha256: ${options.action.closeComment ? sha256(options.action.closeComment) : "none"}
 review_comment_sha256: none
 review_comment_id: unknown
@@ -15501,6 +16368,7 @@ work_likely_files: ${jsonFrontMatterValue(options.decision.workLikelyFiles)}
 triage_priority: ${options.decision.triagePriority}
 impact_labels: ${jsonFrontMatterValue(options.decision.impactLabels)}
 merge_risk_labels: ${jsonFrontMatterValue(options.decision.mergeRiskLabels)}
+maturity_labels: ${jsonFrontMatterValue(options.decision.maturityLabels)}
 merge_risk_options: ${JSON.stringify(options.decision.mergeRiskOptions)}
 review_metrics: ${JSON.stringify(options.decision.reviewMetrics)}
 label_justifications: ${JSON.stringify(options.decision.labelJustifications)}
@@ -15754,17 +16622,41 @@ function planCommand(args: Args): void {
 
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
-  const openclawDir = resolve(
-    stringArg(args.target_dir, stringArg(args.openclaw_dir, `../${profile.checkoutDir}`)),
+  const localOnly = boolArg(args.local_only);
+  const verbose = boolArg(args.verbose);
+  const itemNumber = numberArg(args.item_number, 0) || undefined;
+  const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
+  const itemNumbers = hasItemNumbersInput
+    ? itemNumbersArg(args.item_numbers, undefined)
+    : undefined;
+  const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
+  const humanLocalReview = localExactItem && !verbose;
+  const artifactDir = resolve(
+    stringArg(args.artifact_dir, defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers)),
   );
-  const artifactDir = resolve(stringArg(args.artifact_dir, "artifacts/reviews"));
+  if (humanLocalReview) {
+    console.error(`Local ClawSweeper review for ${targetRepo()}#${itemNumber}`);
+    console.error("");
+    console.error("Preparing target checkout");
+  }
+  const checkout = resolveReviewCheckout({
+    args,
+    artifactDir,
+    humanLocalReview,
+    itemNumber,
+    itemNumbers,
+    localOnly,
+    profile,
+    verbose,
+  });
+  const openclawDir = checkout.openclawDir;
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const batchSize = numberArg(args.batch_size, DEFAULT_PLAN_BATCH_SIZE);
   const maxPages = numberArg(args.max_pages, 250);
   const model = stringArg(args.codex_model, DEFAULT_CODEX_MODEL);
   const reasoningEffort = stringArg(args.codex_reasoning_effort, DEFAULT_REASONING_EFFORT);
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
-  const serviceTier = stringArg(args.codex_service_tier, DEFAULT_SERVICE_TIER);
+  const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
   const additionalPrompt = stringArg(
     args.additional_prompt,
@@ -15772,15 +16664,14 @@ function reviewCommand(args: Args): void {
   );
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
-  const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hotIntake = boolArg(args.hot_intake);
-  const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
-  const itemNumbers = hasItemNumbersInput
-    ? itemNumbersArg(args.item_numbers, undefined)
-    : undefined;
   const readonlyOpenclaw = boolArg(args.readonly_openclaw);
+  const skipStartComment = boolArg(args.skip_start_comment) || localOnly;
+  const forcedLoginMethod = reviewCodexForcedLoginMethod(args);
   ensureDir(artifactDir);
-  const git = gitInfo(openclawDir);
+  const git = checkout.gitTargetBranch
+    ? gitInfo(openclawDir, { targetBranch: checkout.gitTargetBranch })
+    : gitInfo(openclawDir);
   const reviewPolicy = reviewPolicyHash({ model, reasoningEffort, sandboxMode, serviceTier });
   const readonlyModeSnapshots = readonlyOpenclaw ? makeTreeReadOnly(openclawDir) : [];
   try {
@@ -15795,20 +16686,38 @@ function reviewCommand(args: Args): void {
     if (itemNumber) selectionOptions.itemNumber = itemNumber;
     if (itemNumbers) selectionOptions.itemNumbers = itemNumbers;
     if (hotIntake) selectionOptions.hotIntake = true;
+    if (humanLocalReview) {
+      console.error("");
+      console.error("Loading review item");
+    }
     const { candidates, scannedPages } = selectCandidates(selectionOptions);
-    console.error(
-      `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} selected=${candidates.length} scanned_pages=${scannedPages}`,
-    );
+    if (humanLocalReview) {
+      if (candidates.length === 0) throw exactLocalReviewNoCandidateError(itemNumber, shardIndex);
+      const item = candidates[0]!;
+      console.error(`  item: ${item.kind === "pull_request" ? "PR" : "issue"} #${item.number}`);
+      console.error(`  title: ${item.title}`);
+      console.error("  state: open");
+    } else {
+      console.error(
+        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} selected=${candidates.length} scanned_pages=${scannedPages}`,
+      );
+    }
     writeFileSync(
       join(artifactDir, "selection.json"),
       JSON.stringify({ shardIndex, shardCount, scannedPages, candidates, reviewPolicy }, null, 2),
     );
     let completed = 0;
     let codexFailures = 0;
+    const codexFailureReports: string[] = [];
     for (const item of candidates) {
-      console.error(
-        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start #${item.number} (${completed + 1}/${candidates.length})`,
-      );
+      if (humanLocalReview) {
+        console.error("");
+        console.error("Collecting GitHub context");
+      } else {
+        console.error(
+          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start #${item.number} (${completed + 1}/${candidates.length})`,
+        );
+      }
       const contextStartedAt = Date.now();
       const context = collectItemContext(item);
       const contextElapsedMs = Date.now() - contextStartedAt;
@@ -15823,28 +16732,48 @@ function reviewCommand(args: Args): void {
         mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
       );
       const snapshotHash = itemSnapshotHash(item, context);
-      try {
-        const startComment = postReviewStartStatusComment({
-          item,
-          position: completed + 1,
-          total: candidates.length,
-          shardIndex,
-          shardCount,
-        });
-        console.error(
-          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=${startComment} #${item.number}`,
-        );
-      } catch (error) {
-        console.error(
-          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=failed #${item.number}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      if (skipStartComment) {
+        if (!humanLocalReview) {
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=skipped #${item.number}`,
+          );
+        }
+      } else {
+        try {
+          const startComment = postReviewStartStatusComment({
+            item,
+            position: completed + 1,
+            total: candidates.length,
+            shardIndex,
+            shardCount,
+          });
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=${startComment} #${item.number}`,
+          );
+        } catch (error) {
+          console.error(
+            `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} start-comment=failed #${item.number}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
       let decision: Decision;
       let codexElapsedMs = 0;
+      let codexFailed = false;
       const codexStartedAt = Date.now();
       try {
+        if (humanLocalReview) {
+          console.error("");
+          console.error("Running Codex review");
+          console.error(`  timeout: ${displayDurationMs(timeoutMs)}`);
+          console.error(
+            `  stdout: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stdout.log`))}`,
+          );
+          console.error(
+            `  stderr: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stderr.log`))}`,
+          );
+        }
         decision = runCodex({
           item,
           context,
@@ -15854,14 +16783,19 @@ function reviewCommand(args: Args): void {
           reasoningEffort,
           sandboxMode,
           serviceTier,
+          forcedLoginMethod,
+          preserveCodexAuth: localOnly,
+          preferWindowsAppBinary: localOnly,
           timeoutMs,
           workDir: codexWorkDir,
           additionalPrompt,
           proofScratchDir,
           prompt: prompt.text,
+          quietLogs: humanLocalReview,
         });
       } catch (error) {
         codexFailures += 1;
+        codexFailed = true;
         if (error instanceof CodexReviewError) {
           decision = codexFailureDecision(error.status, error.message, error.stdout, error.stderr, {
             errorCode: error.errorCode,
@@ -15888,8 +16822,9 @@ function reviewCommand(args: Args): void {
         codexElapsedMs,
       };
       const action = reviewActionForDecision({ item, decision, git, runtime });
+      const reportPath = join(artifactDir, reportFileName(item.repo, item.number));
       writeFileSync(
-        join(artifactDir, reportFileName(item.repo, item.number)),
+        reportPath,
         markdownFor({
           item,
           context,
@@ -15904,17 +16839,38 @@ function reviewCommand(args: Args): void {
         "utf8",
       );
       completed += 1;
+      if (codexFailed) codexFailureReports.push(reportPath);
+      if (humanLocalReview) {
+        console.error("");
+        console.error(codexFailed ? "Codex review failed" : "Review complete");
+        console.error(`  elapsed: ${displayDurationMs(codexElapsedMs)}`);
+        console.error(`  decision: ${decision.decision}`);
+        console.error(`  confidence: ${decision.confidence}`);
+        console.error(`  action: ${action.actionTaken}`);
+        console.error(`  report: ${displayPath(reportPath)}`);
+      } else {
+        console.error(
+          `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} done #${item.number} (${completed}/${candidates.length}) decision=${decision.decision} confidence=${decision.confidence} action=${action.actionTaken}`,
+        );
+      }
+    }
+    if (!humanLocalReview) {
       console.error(
-        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} done #${item.number} (${completed}/${candidates.length}) decision=${decision.decision} confidence=${decision.confidence} action=${action.actionTaken}`,
+        `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} complete reviewed=${completed}`,
       );
     }
-    console.error(
-      `[review] ${new Date().toISOString()} shard=${shardIndex}/${shardCount} complete reviewed=${completed}`,
-    );
     if (codexFailures > 0) {
-      throw new Error(
-        `Codex failed for ${codexFailures} item${codexFailures === 1 ? "" : "s"}; review artifacts were written and the workflow recovery lane can requeue the planned set.`,
-      );
+      const message = `Codex failed for ${codexFailures} item${
+        codexFailures === 1 ? "" : "s"
+      }; review artifacts were written and the workflow recovery lane can requeue the planned set.${
+        codexFailureReports.length > 0
+          ? ` Report${codexFailureReports.length === 1 ? "" : "s"}: ${codexFailureReports
+              .map(displayPath)
+              .join(", ")}`
+          : ""
+      }`;
+      if (humanLocalReview) throw new UserFacingCommandError(message);
+      throw new Error(message);
     }
   } finally {
     restoreTreeModes(readonlyModeSnapshots);
@@ -16264,46 +17220,39 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
   const maybeLogProgress = (message: string): void => {
     if (processedCount % progressEvery === 0) logProgress(message);
   };
-  const reportEntriesForDir = (
+  const applyReportEntriesForDir = (
     dir: string,
     location: "items" | "closed",
-  ): Array<{
-    name: string;
-    number: number;
-    path: string;
-    location: "items" | "closed";
-    priority: number;
-    applyCheckedAt: number;
-  }> => {
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .filter((name) => parseReportFileName(name) !== null)
-      .filter((name) => {
-        const markdown = readFileSync(join(dir, name), "utf8");
-        if (!isMarkdownForActiveRepo(markdown, name)) return false;
-        return (
-          requestedItemNumberSet.size === 0 ||
-          requestedItemNumberSet.has(numberForMarkdownFile(name))
-        );
-      })
-      .map((name) => ({
-        name,
-        number: numberForMarkdownFile(name),
-        path: join(dir, name),
+    filterRequested = true,
+  ): Array<
+    ReportEntry & {
+      location: "items" | "closed";
+      priority: number;
+      applyCheckedAt: number;
+    }
+  > =>
+    reportEntriesForDir(dir)
+      .filter(
+        (entry) =>
+          entry.repo === targetRepo() &&
+          (!filterRequested ||
+            requestedItemNumberSet.size === 0 ||
+            requestedItemNumberSet.has(entry.number)),
+      )
+      .map((entry) => ({
+        ...entry,
         location,
-        ...applyQueueSortFields(readFileSync(join(dir, name), "utf8"), syncCommentsOnly, applyKind),
+        ...applyQueueSortFields(entry.markdown, syncCommentsOnly, applyKind),
       }));
-  };
-  const fileEntries = reportEntriesForDir(itemsDir, "items").sort(
+  const fileEntries = applyReportEntriesForDir(itemsDir, "items").sort(
     (left, right) =>
       left.priority - right.priority ||
       left.applyCheckedAt - right.applyCheckedAt ||
       left.number - right.number,
   );
   const files = fileEntries.map((entry) => entry.name);
-  const openFileEntryByNumber = new Map(
-    fileEntries.filter((entry) => entry.location === "items").map((entry) => [entry.number, entry]),
-  );
+  const allOpenFileEntries = applyReportEntriesForDir(itemsDir, "items", false);
+  const openFileEntryByNumber = new Map(allOpenFileEntries.map((entry) => [entry.number, entry]));
   const closedThisRun = new Set<string>();
   if (fileEntries.length === 0 && !existsSync(itemsDir)) {
     console.log("No items directory.");
@@ -16326,9 +17275,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       logProgress(`stopping apply: max runtime ${maxRuntimeMs}ms reached`);
       break;
     }
-    let markdown = readFileSync(path, "utf8");
-    const repo = markdownRepository(markdown, path);
-    const number = numberForMarkdownFile(file);
+    let markdown = entry.markdown;
+    const repo = entry.repo;
+    const number = entry.number;
     const decision = frontMatterValue(markdown, "decision");
     let closeReason = frontMatterValue(markdown, "close_reason") as CloseReason | undefined;
     const action = frontMatterValue(markdown, "action_taken");
@@ -16359,7 +17308,12 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       });
       renameSync(path, join(closedDir, file));
     };
+    const markApplyChecked = (): void => {
+      markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
+      if (!dryRun) writeFileSync(path, markdown, "utf8");
+    };
     const recordApplySkipped = (actionTaken: ActionTaken, reason: string): boolean => {
+      markApplyChecked();
       results.push({ number, action: actionTaken, reason });
       processedCount += 1;
       maybeLogProgress(`skipped #${number}: ${reason}`);
@@ -16367,8 +17321,6 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     };
     const markApplySkipped = (actionTaken: ActionTaken, reason: string): boolean => {
       markdown = replaceFrontMatterValue(markdown, "action_taken", actionTaken);
-      markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeFileSync(path, markdown, "utf8");
       return recordApplySkipped(actionTaken, reason);
     };
     const markLabelSyncAuthSkipped = (labelKind: string): boolean =>
@@ -16388,9 +17340,13 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         action !== "retry_pr_close_coverage_proof" &&
         !shouldProbeClosedState)
     ) {
-      continue;
-    }
-    if (!storedHash && !shouldProbeClosedState) {
+      if (
+        !storedHash &&
+        requestedItemNumberSet.has(number) &&
+        recordApplySkipped("kept_open", "review lacks an item snapshot hash")
+      ) {
+        break;
+      }
       continue;
     }
     let isCloseProposal = isApplyCloseCandidateReport(markdown);
@@ -16484,6 +17440,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       ) {
         return false;
       }
+      if (
+        closeReason === "stalled_unproven_pr" &&
+        stalledUnprovenPrApplyBlockReasonSafe(number, item)
+      ) {
+        return false;
+      }
+      if (closeReason === "abandoned_pr" && abandonedPrApplyBlockReasonSafe(number, item)) {
+        return false;
+      }
       if (currentPrCloseCoverageProofGateBlock()) return false;
       return true;
     };
@@ -16542,6 +17507,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               counterpartNumber,
               counterpartReviewCommentBody,
             );
+            const counterpartAllowApplyCloseActionUpgrade =
+              isApplyCloseCandidateReport(counterpartMarkdown);
+            const counterpartMarkedReviewCommentHash = sha256(counterpartMarkedReviewComment);
             const counterpartNeedsReviewCommentSync = shouldSyncReviewComment({
               syncCommentsOnly: false,
               isCloseProposal: true,
@@ -16554,10 +17522,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               needsReviewCommentBodySync: !commentBodyMatches(
                 counterpartReviewComment,
                 counterpartMarkedReviewComment,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
               ),
-              needsReviewCommentHashSync:
-                frontMatterValue(counterpartMarkdown, "review_comment_sha256") !==
-                sha256(counterpartMarkedReviewComment),
+              needsReviewCommentHashSync: !reviewCommentHashMatches(
+                counterpartReviewComment,
+                counterpartMarkedReviewComment,
+                frontMatterValue(counterpartMarkdown, "review_comment_sha256"),
+                counterpartMarkedReviewCommentHash,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
+              ),
               needsReviewCommentReferenceSync:
                 frontMatterValue(counterpartMarkdown, "review_comment_id") === "unknown" ||
                 frontMatterValue(counterpartMarkdown, "review_comment_url") === "unknown",
@@ -16620,6 +17593,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               }) === null &&
               counterpartOpenClosingPullRequestReason === null &&
               counterpartSameAuthorReason === null;
+            if (result && !fileEntries.some((entry) => entry.number === counterpartNumber)) {
+              fileEntries.push(counterpartEntry);
+            }
           }
         }
       }
@@ -16628,6 +17604,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       return result;
     };
     if (syncCommentsOnly && state !== "open") {
+      markApplyChecked();
       results.push({ number, action: "skipped_already_closed", reason: `state is ${state}` });
       processedCount += 1;
       maybeLogProgress(`skipped comment sync #${number}: already ${state}`);
@@ -16717,68 +17694,136 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         continue;
       }
     }
+    if (
+      state === "open" &&
+      isCloseProposal &&
+      (closeReason === "stalled_unproven_pr" || closeReason === "abandoned_pr") &&
+      !syncCommentsOnly &&
+      (applyKind === "all" || item.kind === applyKind) &&
+      closeReasonEnabled(closeReason, applyCloseReasons)
+    ) {
+      const inactivityBlockReason =
+        closeReason === "stalled_unproven_pr"
+          ? stalledUnprovenPrApplyBlockReasonSafe(number, item)
+          : abandonedPrApplyBlockReasonSafe(number, item);
+      if (inactivityBlockReason) {
+        if (markApplySkipped("kept_open", inactivityBlockReason)) break;
+        continue;
+      }
+    }
+    const existingReviewComment = issueReviewComment(number, [
+      renderReviewCommentFromReport(markdown, closeReason ?? "none", { previousLabels }),
+      reviewSectionValue(markdown, "closeComment"),
+    ]);
+    const existingReviewCommentUpdatedAt = commentUpdatedAt(existingReviewComment);
+    if (existingReviewCommentUpdatedAt) {
+      allowedSelfMutationUpdatedAts.add(existingReviewCommentUpdatedAt);
+    }
+    const updatedSinceReview = Boolean(storedUpdatedAt && item.updatedAt !== storedUpdatedAt);
+    const reviewCommentOnlyUpdate = item.updatedAt === commentUpdatedAt(existingReviewComment);
+    const labelSyncFreshEnough = (): boolean => {
+      if (!storedUpdatedAt) return false;
+      if (!updatedSinceReview || reviewCommentOnlyUpdate) return true;
+      const completeFreshHeadReview =
+        !isCloseProposal &&
+        item.kind === "pull_request" &&
+        frontMatterValue(markdown, "review_status") === "complete" &&
+        freshPullRequestReviewHead(markdown, currentItemContext());
+      if (!completeFreshHeadReview) {
+        const existingReviewCommentUpdatedAtMs = timestampMs(
+          commentUpdatedAt(existingReviewComment),
+        );
+        const itemUpdatedAtMs = timestampMs(item.updatedAt);
+        if (existingReviewCommentUpdatedAtMs === null || itemUpdatedAtMs === null) return false;
+        if (Math.abs(itemUpdatedAtMs - existingReviewCommentUpdatedAtMs) > 5 * 60 * 1000) {
+          return false;
+        }
+      }
+      const storedUpdatedAtMs = timestampMs(storedUpdatedAt);
+      if (storedUpdatedAtMs === null) return false;
+      return !contextHasNonAutomationActivityAfter(currentItemContext(), storedUpdatedAtMs);
+    };
+    const stalePrReviewHead =
+      state === "open" && item.kind === "pull_request"
+        ? stalePullRequestReviewHead(markdown, currentItemContext())
+        : null;
     let currentPrStatusKind: PrStatusLabelKind | null = null;
     if (state === "open" && item.kind === "pull_request") {
-      const realBehaviorProof = reportRealBehaviorProof(markdown);
-      const proofSufficientSyncResult = syncRealBehaviorProofSufficientLabel({
-        number,
-        labels: item.labels,
-        proof: realBehaviorProof,
-        dryRun,
-      });
-      item.labels = proofSufficientSyncResult.labels;
-      clawSweeperLabelsChanged ||= proofSufficientSyncResult.changed;
-      const proofMediaSyncResult = syncRealBehaviorProofMediaLabels({
-        number,
-        labels: item.labels,
-        proof: realBehaviorProof,
-        dryRun,
-      });
-      item.labels = proofMediaSyncResult.labels;
-      clawSweeperLabelsChanged ||= proofMediaSyncResult.changed;
-      const prRatingSyncResult = syncPrRatingLabel({
-        number,
-        labels: item.labels,
-        rating: reportPrRating(markdown),
-        reviewFailed: frontMatterValue(markdown, "review_status") === "failed",
-        dryRun,
-      });
-      item.labels = prRatingSyncResult.labels;
-      clawSweeperLabelsChanged ||= prRatingSyncResult.changed;
-      const featureShowcaseSyncResult = syncFeatureShowcaseLabel({
-        number,
-        labels: item.labels,
-        isPullRequest: true,
-        itemCategory: frontMatterValue(markdown, "item_category"),
-        requiresNewFeature: frontMatterValue(markdown, "requires_new_feature") === "true",
-        showcase: reportFeatureShowcase(markdown),
-        securityReview: reportSecurityReview(markdown),
-        overallCorrectness: reportOverallCorrectness(markdown),
-        dryRun,
-      });
-      item.labels = featureShowcaseSyncResult.labels;
-      clawSweeperLabelsChanged ||= featureShowcaseSyncResult.changed;
-      currentPrStatusKind = prStatusLabelKindFromReport(
-        markdown,
-        currentItemContext(),
-        item.labels,
-      );
-      const prStatusSyncResult = syncPrStatusLabel({
-        number,
-        labels: item.labels,
-        statusKind: currentPrStatusKind,
-        dryRun,
-      });
-      item.labels = prStatusSyncResult.labels;
-      clawSweeperLabelsChanged ||= prStatusSyncResult.changed;
-      const telegramVisibleProofSyncResult = syncTelegramVisibleProofLabel({
-        number,
-        labels: item.labels,
-        proof: reportTelegramVisibleProof(markdown),
-        dryRun,
-      });
-      item.labels = telegramVisibleProofSyncResult.labels;
-      clawSweeperLabelsChanged ||= telegramVisibleProofSyncResult.changed;
+      if (stalePrReviewHead) {
+        const staleLabelSyncResult = syncStalePullRequestReviewLabels({
+          number,
+          labels: item.labels,
+          dryRun,
+        });
+        item.labels = staleLabelSyncResult.labels;
+        clawSweeperLabelsChanged ||= staleLabelSyncResult.changed;
+        markdown = replaceFrontMatterValue(
+          markdown,
+          "current_pull_head_sha",
+          stalePrReviewHead.liveHeadSha,
+        );
+      } else if (labelSyncFreshEnough()) {
+        const realBehaviorProof = reportRealBehaviorProof(markdown);
+        const proofSufficientSyncResult = syncRealBehaviorProofSufficientLabel({
+          number,
+          labels: item.labels,
+          proof: realBehaviorProof,
+          dryRun,
+        });
+        item.labels = proofSufficientSyncResult.labels;
+        clawSweeperLabelsChanged ||= proofSufficientSyncResult.changed;
+        const proofMediaSyncResult = syncRealBehaviorProofMediaLabels({
+          number,
+          labels: item.labels,
+          proof: realBehaviorProof,
+          dryRun,
+        });
+        item.labels = proofMediaSyncResult.labels;
+        clawSweeperLabelsChanged ||= proofMediaSyncResult.changed;
+        const prRatingSyncResult = syncPrRatingLabel({
+          number,
+          labels: item.labels,
+          rating: reportPrRating(markdown),
+          reviewFailed: frontMatterValue(markdown, "review_status") === "failed",
+          dryRun,
+        });
+        item.labels = prRatingSyncResult.labels;
+        clawSweeperLabelsChanged ||= prRatingSyncResult.changed;
+        const featureShowcaseSyncResult = syncFeatureShowcaseLabel({
+          number,
+          labels: item.labels,
+          isPullRequest: true,
+          itemCategory: frontMatterValue(markdown, "item_category"),
+          requiresNewFeature: frontMatterValue(markdown, "requires_new_feature") === "true",
+          showcase: reportFeatureShowcase(markdown),
+          securityReview: reportSecurityReview(markdown),
+          overallCorrectness: reportOverallCorrectness(markdown),
+          dryRun,
+        });
+        item.labels = featureShowcaseSyncResult.labels;
+        clawSweeperLabelsChanged ||= featureShowcaseSyncResult.changed;
+        currentPrStatusKind = prStatusLabelKindFromReport(
+          markdown,
+          currentItemContext(),
+          item.labels,
+        );
+        const prStatusSyncResult = syncPrStatusLabel({
+          number,
+          labels: item.labels,
+          statusKind: currentPrStatusKind,
+          dryRun,
+        });
+        item.labels = prStatusSyncResult.labels;
+        clawSweeperLabelsChanged ||= prStatusSyncResult.changed;
+        const telegramVisibleProofSyncResult = syncTelegramVisibleProofLabel({
+          number,
+          labels: item.labels,
+          proof: reportTelegramVisibleProof(markdown),
+          dryRun,
+        });
+        item.labels = telegramVisibleProofSyncResult.labels;
+        clawSweeperLabelsChanged ||= telegramVisibleProofSyncResult.changed;
+      }
     }
     markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
     if (clawSweeperLabelsChanged && !dryRun) {
@@ -16792,18 +17837,21 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       renderOptions.hasOpenLinkedPullRequest =
         openClosingPullRequestApplyReason(currentClosingPullRequests) !== null;
     }
-    let reviewComment = renderReviewCommentFromReport(
-      markdown,
-      closeReason ?? "none",
-      renderOptions,
-    );
-    const existingReviewComment = issueReviewComment(number, [
-      reviewComment,
-      reviewSectionValue(markdown, "closeComment"),
-    ]);
-    const existingReviewCommentUpdatedAt = commentUpdatedAt(existingReviewComment);
-    if (existingReviewCommentUpdatedAt) {
-      allowedSelfMutationUpdatedAts.add(existingReviewCommentUpdatedAt);
+    const renderCurrentReviewComment = (): string =>
+      stalePrReviewHead
+        ? stalePullRequestReviewComment({
+            number,
+            stale: stalePrReviewHead,
+            ...(renderOptions.previousReviewCommentBody
+              ? { previousReviewCommentBody: renderOptions.previousReviewCommentBody }
+              : {}),
+          })
+        : renderReviewCommentFromReport(markdown, closeReason ?? "none", renderOptions);
+    let reviewComment = renderCurrentReviewComment();
+    const existingReviewCommentBody = rawCommentBody(existingReviewComment);
+    if (existingReviewCommentBody.trim()) {
+      renderOptions.previousReviewCommentBody = existingReviewCommentBody;
+      reviewComment = renderCurrentReviewComment();
     }
     let markedReviewComment = markedReviewCommentBody(number, reviewComment);
     let proofBlockedForCommentSync: PrCloseCoverageProofGateBlock | null = null;
@@ -16825,39 +17873,17 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       const authorAssociation = isMaintainerAuthorAssociation(currentAuthorAssociation)
         ? currentAuthorAssociation
         : reviewedAuthorAssociation;
-      if (isCloseProposal) {
-        markdown = replaceFrontMatterValue(markdown, "author_association", authorAssociation);
-        markdown = replaceFrontMatterValue(markdown, "action_taken", "skipped_maintainer_authored");
-        markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-        if (!dryRun) writeFileSync(path, markdown, "utf8");
-      }
-      if (isCloseProposal) {
-        results.push({
-          number,
-          action: "skipped_maintainer_authored",
-          reason: `author association is ${authorAssociation}`,
-        });
-        processedCount += 1;
-        maybeLogProgress(`skipped #${number}: maintainer authored`);
-        if (processedCount >= processedLimit) break;
-        continue;
-      }
+      markdown = replaceFrontMatterValue(markdown, "author_association", authorAssociation);
+      markdown = replaceFrontMatterValue(markdown, "action_taken", "skipped_maintainer_authored");
+      if (
+        recordApplySkipped(
+          "skipped_maintainer_authored",
+          `author association is ${authorAssociation}`,
+        )
+      )
+        break;
+      continue;
     }
-    const updatedSinceReview = Boolean(storedUpdatedAt && item.updatedAt !== storedUpdatedAt);
-    const reviewCommentOnlyUpdate = item.updatedAt === commentUpdatedAt(existingReviewComment);
-    const labelSyncFreshEnough = (): boolean => {
-      if (!storedUpdatedAt) return false;
-      if (!updatedSinceReview || reviewCommentOnlyUpdate) return true;
-      const existingReviewCommentUpdatedAtMs = timestampMs(commentUpdatedAt(existingReviewComment));
-      const itemUpdatedAtMs = timestampMs(item.updatedAt);
-      if (existingReviewCommentUpdatedAtMs === null || itemUpdatedAtMs === null) return false;
-      if (Math.abs(itemUpdatedAtMs - existingReviewCommentUpdatedAtMs) > 5 * 60 * 1000) {
-        return false;
-      }
-      const storedUpdatedAtMs = timestampMs(storedUpdatedAt);
-      if (storedUpdatedAtMs === null) return false;
-      return !contextHasNonAutomationActivityAfter(currentItemContext(), storedUpdatedAtMs);
-    };
     const markChangedSinceReview = (options: {
       reason: string;
       currentUpdatedAt?: string | undefined;
@@ -16995,6 +18021,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
           "applied_at",
           commentUpdatedAt(existingReviewComment) ?? new Date().toISOString(),
         );
+        markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
         archiveClosed(markdown);
         closedCount += 1;
         processedCount += 1;
@@ -17014,6 +18041,16 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       processedCount += 1;
       maybeLogProgress(`archived #${number}: already ${state}`);
       if (processedCount >= processedLimit) break;
+      continue;
+    }
+    if (isCloseProposal && stalePrReviewHead) {
+      if (
+        markChangedSinceReview({
+          reason: stalePrReviewHead.reason,
+          currentUpdatedAt: item.updatedAt,
+        })
+      )
+        break;
       continue;
     }
     if (isCloseProposal && updatedSinceReview && !reviewCommentOnlyUpdate) {
@@ -17054,7 +18091,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       }
     }
     const isCurrentCompleteReport =
-      frontMatterValue(markdown, "review_status") === "complete" && labelSyncFreshEnough();
+      frontMatterValue(markdown, "review_status") === "complete" &&
+      !stalePrReviewHead &&
+      labelSyncFreshEnough();
     if (state === "open" && isCurrentCompleteReport) {
       try {
         const syncResult = syncPriorityLabel({
@@ -17075,6 +18114,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         item.labels = impactSyncResult.labels;
         clawSweeperLabelsChanged ||= impactSyncResult.changed;
         markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
+        const maturitySyncResult = syncMaturityLabels({
+          number,
+          labels: item.labels,
+          maturityLabels: item.kind === "pull_request" ? [] : maturityLabelsFromReport(markdown),
+          dryRun,
+        });
+        item.labels = maturitySyncResult.labels;
+        clawSweeperLabelsChanged ||= maturitySyncResult.changed;
+        markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
         let mergeRiskLabelsChanged = false;
         if (item.kind === "pull_request") {
           const mergeRiskSyncResult = syncMergeRiskLabels({
@@ -17088,7 +18136,12 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
           clawSweeperLabelsChanged ||= mergeRiskSyncResult.changed;
           markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
         }
-        if (syncResult.changed || impactSyncResult.changed || mergeRiskLabelsChanged) {
+        if (
+          syncResult.changed ||
+          impactSyncResult.changed ||
+          maturitySyncResult.changed ||
+          mergeRiskLabelsChanged
+        ) {
           rememberSelfMutationUpdatedAt();
         }
       } catch (error) {
@@ -17122,7 +18175,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         continue;
       }
     }
-    reviewComment = renderReviewCommentFromReport(markdown, closeReason ?? "none", renderOptions);
+    reviewComment = renderCurrentReviewComment();
     markedReviewComment = markedReviewCommentBody(number, reviewComment);
     if (isCloseProposal && item.kind === "issue") {
       currentClosingPullRequests ??= closingPullRequestsForIssue(number);
@@ -17136,13 +18189,20 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       }
     }
     let reviewCommentHash = sha256(markedReviewComment);
+    const allowApplyCloseActionUpgrade = isUpgradedCloseCandidate;
     let existingReviewCommentMatches = commentBodyMatches(
       existingReviewComment,
       markedReviewComment,
+      { allowApplyCloseActionUpgrade },
     );
     let needsReviewCommentBodySync = !existingReviewComment || !existingReviewCommentMatches;
-    let needsReviewCommentHashSync =
-      frontMatterValue(markdown, "review_comment_sha256") !== reviewCommentHash;
+    let needsReviewCommentHashSync = !reviewCommentHashMatches(
+      existingReviewComment,
+      markedReviewComment,
+      frontMatterValue(markdown, "review_comment_sha256"),
+      reviewCommentHash,
+      { allowApplyCloseActionUpgrade },
+    );
     let needsReviewCommentReferenceSync =
       frontMatterValue(markdown, "review_comment_id") === "unknown" ||
       frontMatterValue(markdown, "review_comment_url") === "unknown";
@@ -17273,6 +18333,22 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       ? `synced advisory issue labels #${number}`
       : `synced ClawSweeper labels #${number}`;
     if (needsReviewCommentSync) {
+      const staleSyncReason = needsReviewCommentBodySync
+        ? staleReviewCommentSyncReason(markdown, existingReviewComment, number)
+        : null;
+      if (staleSyncReason) {
+        markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
+        if (!dryRun) writeFileSync(path, markdown, "utf8");
+        results.push({
+          number,
+          action: "skipped_stale_review_comment_sync",
+          reason: staleSyncReason,
+        });
+        processedCount += 1;
+        maybeLogProgress(`skipped stale review comment sync #${number}`);
+        if (processedCount >= processedLimit) break;
+        continue;
+      }
       const lockedReason = needsReviewCommentBodySync ? lockedConversationApplyReason(item) : null;
       if (lockedReason) {
         if (markApplySkipped("skipped_locked_conversation", lockedReason)) break;
@@ -17308,12 +18384,11 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
             continue;
           }
         }
-      } else if (needsReviewCommentSync) {
+      } else {
         syncReasons.push("recorded existing durable comment metadata");
       }
-      if (needsReviewCommentSync) {
-        markdown = updateReviewCommentMetadata(markdown, syncedComment, markedReviewComment);
-      }
+      markdown = updateReviewCommentMetadata(markdown, syncedComment, markedReviewComment);
+      markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
       if (!dryRun) writeFileSync(path, markdown, "utf8");
       results.push({
         number,
@@ -17328,6 +18403,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     }
     if (proofBlockedForCommentSync) {
       if (!needsReviewCommentSync) {
+        markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
         if (!dryRun) writeFileSync(path, markdown, "utf8");
         results.push({
           number,
@@ -17345,6 +18421,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       !needsReviewCommentSync &&
       (!isCloseProposal || syncCommentsOnly)
     ) {
+      markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
       if (!dryRun) writeFileSync(path, markdown, "utf8");
       results.push({
         number,
@@ -17361,25 +18438,18 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     }
     if (closedCount >= limit) break;
     if (applyKind !== "all" && item.kind !== applyKind) {
-      results.push({
-        number,
-        action: "kept_open",
-        reason: `type is ${item.kind}; apply kind is ${applyKind}`,
-      });
-      processedCount += 1;
-      maybeLogProgress(`skipped #${number}: type is ${item.kind}`);
-      if (processedCount >= processedLimit) break;
+      if (recordApplySkipped("kept_open", `type is ${item.kind}; apply kind is ${applyKind}`))
+        break;
       continue;
     }
     if (!closeReasonEnabled(closeReason, applyCloseReasons)) {
-      results.push({
-        number,
-        action: "kept_open",
-        reason: `close reason ${closeReason} is not enabled for this apply run`,
-      });
-      processedCount += 1;
-      maybeLogProgress(`skipped #${number}: close reason ${closeReason} not enabled`);
-      if (processedCount >= processedLimit) break;
+      if (
+        recordApplySkipped(
+          "kept_open",
+          `close reason ${closeReason} is not enabled for this apply run`,
+        )
+      )
+        break;
       continue;
     }
     const currentReportValidation = validateCloseDecision(
@@ -17413,14 +18483,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       staleMinAgeDays,
     });
     if (ageSkipReason) {
-      results.push({
-        number,
-        action: "kept_open",
-        reason: ageSkipReason,
-      });
-      processedCount += 1;
-      maybeLogProgress(`skipped #${number}: ${ageSkipReason}`);
-      if (processedCount >= processedLimit) break;
+      if (recordApplySkipped("kept_open", ageSkipReason)) break;
       continue;
     }
     const prCloseCoverageBlock =
@@ -17462,6 +18525,16 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         : null;
     if (lowSignalBlockReason) {
       if (markApplySkipped("kept_open", lowSignalBlockReason)) break;
+      continue;
+    }
+    const inactivityCloseBlockReason =
+      closeReason === "stalled_unproven_pr"
+        ? stalledUnprovenPrApplyBlockReasonSafe(number, item)
+        : closeReason === "abandoned_pr"
+          ? abandonedPrApplyBlockReasonSafe(number, item)
+          : null;
+    if (inactivityCloseBlockReason) {
+      if (markApplySkipped("kept_open", inactivityCloseBlockReason)) break;
       continue;
     }
     logProgress(`closing #${number}`);
@@ -17509,6 +18582,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     markdown = replaceFrontMatterValue(markdown, "close_comment_sha256", sha256(reviewComment));
     markdown = replaceFrontMatterValue(markdown, "action_taken", "closed");
     markdown = replaceFrontMatterValue(markdown, "applied_at", new Date().toISOString());
+    markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
     archiveClosed(markdown);
     closedCount += 1;
     processedCount += 1;
@@ -17681,29 +18755,105 @@ function proofLaneCandidateRecords(
       if (frontMatterValue(markdown, "type") !== "pull_request") return false;
       return true;
     })
-    .sort(
-      (left, right) =>
-        Number(right.likely) - Number(left.likely) ||
-        left.sortAt - right.sortAt ||
-        left.number - right.number,
+    .sort((left, right) => compareProofLaneSortKey(left, right));
+}
+
+function proofLaneSortAt(value: number): number {
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+}
+
+function compareProofLaneSortKey(
+  left: Pick<ProofLaneCursor, "likely" | "number" | "sortAt">,
+  right: Pick<ProofLaneCursor, "likely" | "number" | "sortAt">,
+): number {
+  if (left.likely !== right.likely) return left.likely ? -1 : 1;
+  return proofLaneSortAt(left.sortAt) - proofLaneSortAt(right.sortAt) || left.number - right.number;
+}
+
+function rotateProofLaneCandidates<T extends ProofLaneCandidate>(
+  candidates: readonly T[],
+  cursor: ProofLaneCursor | null,
+): T[] {
+  if (!cursor) return [...candidates];
+  return [
+    ...candidates.filter((candidate) => compareProofLaneSortKey(candidate, cursor) > 0),
+    ...candidates.filter((candidate) => compareProofLaneSortKey(candidate, cursor) <= 0),
+  ];
+}
+
+function proofLaneCursorPath(args: Args, requestedItemNumbers: readonly number[]): string | null {
+  if (requestedItemNumbers.length > 0) return null;
+  const rawPath = stringArg(args.cursor_path, "").trim();
+  return rawPath ? resolve(rawPath) : null;
+}
+
+function proofLaneProcessedLimit(args: Args, fallback: number): number {
+  const value = numberArg(args.processed_limit, fallback);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new UserFacingCommandError("--processed-limit must be a positive integer");
+  }
+  return value;
+}
+
+function readProofLaneCursor(path: string): ProofLaneCursor | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = asRecord(JSON.parse(readFileSync(path, "utf8")));
+    const number = Number(parsed.next_cursor_number);
+    if (!Number.isInteger(number) || number <= 0) return null;
+    return {
+      likely: parsed.next_cursor_likely === true,
+      number,
+      sortAt:
+        typeof parsed.next_cursor_sort_at_ms === "number" &&
+        Number.isFinite(parsed.next_cursor_sort_at_ms)
+          ? parsed.next_cursor_sort_at_ms
+          : Number.NEGATIVE_INFINITY,
+    };
+  } catch (error) {
+    console.warn(
+      `Ignoring invalid proof lane cursor ${path}: ${error instanceof Error ? error.message : String(error)}`,
     );
+    return null;
+  }
+}
+
+function writeProofLaneCursor(path: string, lane: string, candidate: ProofLaneCandidate): void {
+  ensureDir(dirname(path));
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        repository: targetRepo(),
+        lane,
+        next_cursor_number: candidate.number,
+        next_cursor_likely: candidate.likely,
+        next_cursor_sort_at_ms: Number.isFinite(candidate.sortAt) ? candidate.sortAt : null,
+        reviewed_at: candidate.reviewedAt ?? null,
+        updated_at: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 }
 
 function proofNudgeCandidateRecords(
   itemsDir: string,
   requestedItemNumbers: readonly number[],
-): (ProofLaneCandidate & { likelyProofNudge: boolean })[] {
+): ProofLaneCandidate[] {
   return proofLaneCandidateRecords(
     itemsDir,
     requestedItemNumbers,
     realBehaviorProofNeedsContributorNudge,
-  ).map((candidate) => ({ ...candidate, likelyProofNudge: candidate.likely }));
+  );
 }
 
 function botProofCandidateRecords(
   itemsDir: string,
   requestedItemNumbers: readonly number[],
-): (ProofLaneCandidate & { likelyBotProof: boolean })[] {
+): ProofLaneCandidate[] {
   return proofLaneCandidateRecords(itemsDir, requestedItemNumbers, (markdown) => {
     return (
       frontMatterValue(markdown, "review_status") === "complete" &&
@@ -17711,7 +18861,7 @@ function botProofCandidateRecords(
       isClawSweeperAppAuthor(frontMatterValue(markdown, "author")) &&
       realBehaviorProofBlocksBotOwnedMerge(markdown)
     );
-  }).map((candidate) => ({ ...candidate, likelyBotProof: candidate.likely }));
+  });
 }
 
 function proofNudgeLiveFetchFailureReason(error: unknown): string {
@@ -17732,6 +18882,13 @@ export function proofNudgeCandidateRecordsForTest(
   return proofNudgeCandidateRecords(itemsDir, requestedItemNumbers);
 }
 
+export function rotateProofLaneCandidatesForTest<T extends ProofLaneCandidate>(
+  candidates: readonly T[],
+  cursor: ProofLaneCursor | null,
+): T[] {
+  return rotateProofLaneCandidates(candidates, cursor);
+}
+
 export function botProofCandidateRecordsForTest(
   itemsDir: string,
   requestedItemNumbers: readonly number[] = [],
@@ -17743,7 +18900,7 @@ function proofNudgesCommand(args: Args): void {
   repoFromArgs(args);
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const limit = Math.max(0, numberArg(args.limit, DEFAULT_PROOF_NUDGE_LIMIT));
-  const processedLimit = Math.max(1, numberArg(args.processed_limit, Math.max(limit * 20, 50)));
+  const processedLimit = proofLaneProcessedLimit(args, Math.max(limit * 20, 50));
   const minAgeDays = Math.max(0, numberArg(args.min_age_days, DEFAULT_PROOF_NUDGE_MIN_AGE_DAYS));
   const cooldownDays = Math.max(
     0,
@@ -17754,6 +18911,7 @@ function proofNudgesCommand(args: Args): void {
   const maxRuntimeMs = numberArg(args.max_runtime_ms, 0);
   const reportPath = resolve(stringArg(args.report_path, join(ROOT, "proof-nudge-report.json")));
   const requestedItemNumbers = itemNumbersArg(args.item_numbers, args.item_number);
+  const cursorPath = proofLaneCursorPath(args, requestedItemNumbers);
 
   if (!existsSync(itemsDir)) {
     const results: ProofNudgeResult[] = [];
@@ -17763,11 +18921,18 @@ function proofNudgesCommand(args: Args): void {
     return;
   }
 
-  const candidates = proofNudgeCandidateRecords(itemsDir, requestedItemNumbers);
+  const allCandidates = proofNudgeCandidateRecords(itemsDir, requestedItemNumbers);
+  const cursor = cursorPath ? readProofLaneCursor(cursorPath) : null;
+  const candidates = rotateProofLaneCandidates(allCandidates, cursor);
   const startedAtMs = Date.now();
   const results: ProofNudgeResult[] = [];
   let processedCount = 0;
   let nudgeCount = 0;
+  let lastProcessedCandidate: ProofLaneCandidate | null = null;
+  const markProcessed = (candidate: ProofLaneCandidate): void => {
+    processedCount += 1;
+    lastProcessedCandidate = candidate;
+  };
   const logProgress = (message: string): void => {
     const counts = results.reduce<Record<string, number>>((accumulator, result) => {
       accumulator[result.action] = (accumulator[result.action] ?? 0) + 1;
@@ -17785,7 +18950,7 @@ function proofNudgesCommand(args: Args): void {
   };
 
   logProgress(
-    `starting proof nudges: candidates=${candidates.length} min_age_days=${minAgeDays} cooldown_days=${cooldownDays} item_numbers=${requestedItemNumbers.join(",") || "all"}`,
+    `starting proof nudges: candidates=${allCandidates.length} min_age_days=${minAgeDays} cooldown_days=${cooldownDays} item_numbers=${requestedItemNumbers.join(",") || "all"} cursor_path=${cursorPath ?? "none"}`,
   );
   for (const candidate of candidates) {
     if (nudgeCount >= limit) break;
@@ -17818,7 +18983,7 @@ function proofNudgesCommand(args: Args): void {
         action: "skipped_live_fetch_failed",
         reason: proofNudgeLiveFetchFailureReason(error),
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     if (state !== "open") {
@@ -17827,7 +18992,7 @@ function proofNudgesCommand(args: Args): void {
         action: "skipped_not_open",
         reason: `state is ${state}`,
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     let pullDetails: Partial<ProofNudgePullRequestDetails> = {};
@@ -17852,7 +19017,7 @@ function proofNudgesCommand(args: Args): void {
         action: "skipped_live_fetch_failed",
         reason: proofNudgeLiveFetchFailureReason(error),
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     const eligibility = proofNudgeEligibility({
@@ -17873,7 +19038,7 @@ function proofNudgesCommand(args: Args): void {
         reason: eligibility.reason,
         headSha: pullDetails.headSha,
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
 
@@ -17885,7 +19050,7 @@ function proofNudgesCommand(args: Args): void {
         action: "skipped_no_live_head",
         reason: "live PR head SHA could not be inspected",
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     const body = renderProofNudgeComment({ item, headSha, timestamp });
@@ -17906,9 +19071,12 @@ function proofNudgesCommand(args: Args): void {
         headSha,
       });
     }
-    processedCount += 1;
+    markProcessed(candidate);
     nudgeCount += 1;
     logProgress(`${dryRun ? "planned" : "posted"} proof nudge #${candidate.number}`);
+  }
+  if (!dryRun && cursorPath && lastProcessedCandidate) {
+    writeProofLaneCursor(cursorPath, "proof_nudges", lastProcessedCandidate);
   }
   ensureDir(dirname(reportPath));
   writeFileSync(reportPath, JSON.stringify(results, null, 2), "utf8");
@@ -17920,12 +19088,13 @@ function botProofCommand(args: Args): void {
   repoFromArgs(args);
   const itemsDir = resolve(stringArg(args.items_dir, defaultItemsDir()));
   const limit = Math.max(0, numberArg(args.limit, DEFAULT_PROOF_NUDGE_LIMIT));
-  const processedLimit = Math.max(1, numberArg(args.processed_limit, Math.max(limit * 20, 50)));
+  const processedLimit = proofLaneProcessedLimit(args, Math.max(limit * 20, 50));
   const execute = boolArg(args.execute);
   const dryRun = !execute;
   const maxRuntimeMs = numberArg(args.max_runtime_ms, 0);
   const reportPath = resolve(stringArg(args.report_path, join(ROOT, "bot-proof-report.json")));
   const requestedItemNumbers = itemNumbersArg(args.item_numbers, args.item_number);
+  const cursorPath = proofLaneCursorPath(args, requestedItemNumbers);
 
   if (!existsSync(itemsDir)) {
     const results: BotProofResult[] = [];
@@ -17935,11 +19104,18 @@ function botProofCommand(args: Args): void {
     return;
   }
 
-  const candidates = botProofCandidateRecords(itemsDir, requestedItemNumbers);
+  const allCandidates = botProofCandidateRecords(itemsDir, requestedItemNumbers);
+  const cursor = cursorPath ? readProofLaneCursor(cursorPath) : null;
+  const candidates = rotateProofLaneCandidates(allCandidates, cursor);
   const startedAtMs = Date.now();
   const results: BotProofResult[] = [];
   let processedCount = 0;
   let actionCount = 0;
+  let lastProcessedCandidate: ProofLaneCandidate | null = null;
+  const markProcessed = (candidate: ProofLaneCandidate): void => {
+    processedCount += 1;
+    lastProcessedCandidate = candidate;
+  };
   const logProgress = (message: string): void => {
     const counts = results.reduce<Record<string, number>>((accumulator, result) => {
       accumulator[result.action] = (accumulator[result.action] ?? 0) + 1;
@@ -17957,7 +19133,7 @@ function botProofCommand(args: Args): void {
   };
 
   logProgress(
-    `starting bot proof handling: candidates=${candidates.length} item_numbers=${requestedItemNumbers.join(",") || "all"}`,
+    `starting bot proof handling: candidates=${allCandidates.length} item_numbers=${requestedItemNumbers.join(",") || "all"} cursor_path=${cursorPath ?? "none"}`,
   );
   for (const candidate of candidates) {
     if (actionCount >= limit) break;
@@ -17993,7 +19169,7 @@ function botProofCommand(args: Args): void {
         action: "skipped_live_fetch_failed",
         reason: proofNudgeLiveFetchFailureReason(error),
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     if (state !== "open") {
@@ -18002,7 +19178,7 @@ function botProofCommand(args: Args): void {
         action: "skipped_not_open",
         reason: `state is ${state}`,
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     const eligibility = botProofEligibility({
@@ -18018,7 +19194,7 @@ function botProofCommand(args: Args): void {
         reason: eligibility.reason,
         headSha: pullDetails.headSha,
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     const headSha = pullDetails.headSha;
@@ -18028,7 +19204,7 @@ function botProofCommand(args: Args): void {
         action: "skipped_no_live_head",
         reason: "live PR head SHA could not be inspected",
       });
-      processedCount += 1;
+      markProcessed(candidate);
       continue;
     }
     const commentBody = renderBotProofDecisionComment({
@@ -18063,9 +19239,12 @@ function botProofCommand(args: Args): void {
         headSha,
       });
     }
-    processedCount += 1;
+    markProcessed(candidate);
     actionCount += 1;
     logProgress(`${dryRun ? "planned" : "posted"} bot proof handling #${candidate.number}`);
+  }
+  if (!dryRun && cursorPath && lastProcessedCandidate) {
+    writeProofLaneCursor(cursorPath, "bot_proof", lastProcessedCandidate);
   }
   ensureDir(dirname(reportPath));
   writeFileSync(reportPath, JSON.stringify(results, null, 2), "utf8");
@@ -18148,6 +19327,28 @@ function markdownFiles(dir: string): string[] {
           );
         })
     : [];
+}
+
+interface ReportEntry {
+  name: string;
+  number: number;
+  path: string;
+  repo: string;
+  markdown: string;
+}
+
+function reportEntriesForDir(dir: string): ReportEntry[] {
+  return markdownFiles(dir).map((name) => {
+    const path = join(dir, name);
+    const markdown = readFileSync(path, "utf8");
+    return {
+      name,
+      number: numberForMarkdownFile(name),
+      path,
+      repo: markdownRepository(markdown, path),
+      markdown,
+    };
+  });
 }
 
 function numberForMarkdownFile(file: string): number {
@@ -18690,8 +19891,12 @@ function dashboardStats(
   closedDir = defaultClosedDir(),
   profile = targetProfile(),
 ): DashboardStats {
-  const files = markdownFiles(itemsDir);
-  const closedFiles = markdownFiles(closedDir);
+  const entries = reportEntriesForDir(itemsDir).filter(
+    (entry) => entry.repo === profile.targetRepo,
+  );
+  const closedEntries = reportEntriesForDir(closedDir).filter(
+    (entry) => entry.repo === profile.targetRepo,
+  );
   const plansDir = defaultPlansDir(profile);
   const now = Date.now();
   let fresh = 0;
@@ -18712,11 +19917,10 @@ function dashboardStats(
   const recent: DashboardItem[] = [];
   const workQueue: DashboardItem[] = [];
   const recentClosed: DashboardClosedItem[] = [];
-  for (const file of files) {
-    const markdown = readFileSync(join(itemsDir, file), "utf8");
-    if (markdownRepository(markdown, join(itemsDir, file)) !== profile.targetRepo) continue;
-    const repo = markdownRepository(markdown, join(closedDir, file));
-    const number = numberForMarkdownFile(file);
+  for (const entry of entries) {
+    const markdown = entry.markdown;
+    const repo = entry.repo;
+    const number = entry.number;
     const reviewedAt = frontMatterValue(markdown, "reviewed_at");
     const reviewStatus = effectiveReviewStatus(markdown);
     const action = frontMatterValue(markdown, "action_taken") ?? "unknown";
@@ -18762,9 +19966,9 @@ function dashboardStats(
       decision,
       action,
       reviewStatus,
-      reportPath: repoRelativePath(join(itemsDir, file)),
-      planPath: existsSync(join(plansDir, file))
-        ? repoRelativePath(join(plansDir, file))
+      reportPath: repoRelativePath(entry.path),
+      planPath: existsSync(join(plansDir, entry.name))
+        ? repoRelativePath(join(plansDir, entry.name))
         : undefined,
       workCandidate,
       workPriority,
@@ -18775,10 +19979,9 @@ function dashboardStats(
       workQueue.push(dashboardItem);
     }
   }
-  for (const file of closedFiles) {
-    const markdown = readFileSync(join(closedDir, file), "utf8");
-    if (markdownRepository(markdown, join(closedDir, file)) !== profile.targetRepo) continue;
-    const repo = markdownRepository(markdown, join(closedDir, file));
+  for (const entry of closedEntries) {
+    const markdown = entry.markdown;
+    const repo = entry.repo;
     const action = frontMatterValue(markdown, "action_taken") ?? "unknown";
     const closedAt = dashboardClosedAt(markdown);
     if (action === "closed") {
@@ -18787,13 +19990,13 @@ function dashboardStats(
     if (closedAt) {
       recentClosed.push({
         repo,
-        number: numberForMarkdownFile(file),
+        number: entry.number,
         kind: (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
         title: frontMatterValue(markdown, "title") ?? "",
         closedAt,
         appliedAt: frontMatterValue(markdown, "applied_at"),
         closeReason: dashboardCloseReason(markdown),
-        reportPath: repoRelativePath(join(closedDir, file)),
+        reportPath: repoRelativePath(entry.path),
       });
     }
     recordDashboardActivity(markdown, activity, now);
@@ -18835,18 +20038,10 @@ function dashboardStats(
     open,
     fresh,
     todo: cadenceDue,
-    files: files.filter(
-      (file) =>
-        markdownRepository(readFileSync(join(itemsDir, file), "utf8"), join(itemsDir, file)) ===
-        profile.targetRepo,
-    ).length,
+    files: entries.length,
     proposedClose,
     closed,
-    archivedFiles: closedFiles.filter(
-      (file) =>
-        markdownRepository(readFileSync(join(closedDir, file), "utf8"), join(closedDir, file)) ===
-        profile.targetRepo,
-    ).length,
+    archivedFiles: closedEntries.length,
     failed,
     stale,
     workCandidates,
@@ -19386,6 +20581,13 @@ function statusCommand(args: Args): void {
     args.bot_owned_proof_decisions_requested,
   );
   const botOwnedProofDispatches = optionalNumberArg(args.bot_owned_proof_dispatches);
+  const applyHealthArg = applyHealthStatusArg(args);
+  const applyHealth =
+    applyHealthArg === undefined
+      ? state.startsWith("Apply ")
+        ? null
+        : readSweepStatusSummary(profile)?.applyHealth
+      : applyHealthArg;
   const statusOptions: Parameters<typeof writeSweepStatus>[0] = {
     state,
     detail,
@@ -19410,8 +20612,24 @@ function statusCommand(args: Args): void {
     statusOptions.botOwnedProofDecisionsRequested = botOwnedProofDecisionsRequested;
   if (botOwnedProofDispatches !== undefined)
     statusOptions.botOwnedProofDispatches = botOwnedProofDispatches;
+  if (applyHealth !== undefined) statusOptions.applyHealth = applyHealth;
   writeSweepStatus(statusOptions);
   console.log(JSON.stringify({ status_path: sweepStatusRelativePath(profile), state, detail }));
+}
+
+function applyHealthStatusArg(args: Args): Record<string, unknown> | undefined {
+  const filePath = stringArg(args.apply_health_file, "");
+  const jsonText = stringArg(args.apply_health_json, "");
+  if (filePath && jsonText) {
+    throw new Error("--apply-health-file and --apply-health-json are mutually exclusive");
+  }
+  const text = filePath ? readFileSync(resolve(filePath), "utf8") : jsonText;
+  if (!text.trim()) return undefined;
+  const parsed = JSON.parse(text) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("apply health status must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function assistCommand(args: Args): void {
@@ -19528,7 +20746,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    console.error(formatFatalError(error));
     process.exit(1);
   });
+}
+
+function formatFatalError(error: unknown): string {
+  if (isUserFacingCommandError(error)) return `Error: ${error.message}`;
+  return error instanceof Error ? error.stack || error.message : String(error);
 }

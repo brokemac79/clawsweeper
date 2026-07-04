@@ -9,6 +9,8 @@ import {
   labelJustificationsMarkdownForTest,
   mergeRiskLabelsForTest,
   mergeRiskLabelSchemeForTest,
+  maturityLabelSchemeForTest,
+  maturityLabelsForTest,
   parseDecision,
   prRatingLabelsForTest,
   prRatingLabelSchemeForTest,
@@ -467,6 +469,17 @@ test("ClawSweeper impact label scheme exposes owned impact labels", () => {
         "This issue is about auth, provider routing, model choice, or SecretRef resolution.",
     },
     {
+      name: "impact:ux-release-blocker",
+      color: "B60205",
+      description: "A non-technical user is blocked without terminal, logs, config, or support.",
+    },
+    {
+      name: "impact:ux-friction",
+      color: "FBCA04",
+      description:
+        "User-facing flow adds avoidable confusion or support burden without fully blocking progress.",
+    },
+    {
       name: "impact:other",
       color: "C5DEF5",
       description:
@@ -513,6 +526,47 @@ test("ClawSweeper impact label schema avoids unsupported response-format keyword
     };
   };
   assert.equal(schema.properties?.impactLabels?.uniqueItems, undefined);
+});
+
+test("review prompt and schema define UX release-blocker override", () => {
+  const schema = JSON.parse(reviewDecisionSchemaText()) as {
+    properties?: {
+      impactLabels?: {
+        description?: string;
+        items?: {
+          enum?: string[];
+        };
+      };
+      labelJustifications?: {
+        items?: {
+          properties?: {
+            label?: {
+              enum?: string[];
+            };
+          };
+        };
+      };
+    };
+  };
+  const schemaDescription = schema.properties?.impactLabels?.description ?? "";
+  const impactLabelEnum = schema.properties?.impactLabels?.items?.enum ?? [];
+  const justificationLabelEnum =
+    schema.properties?.labelJustifications?.items?.properties?.label?.enum ?? [];
+  const prompt = reviewPromptTemplate();
+
+  assert.match(prompt, /Apply this UX override before falling back to ordinary technical severity/);
+  assert.match(prompt, /non-technical first-time or community user/);
+  assert.match(prompt, /terminal commands, config edits, log inspection, manual file edits/);
+  assert.match(prompt, /override requires a\s+blocked user-facing path/);
+  assert.match(prompt, /Set `triagePriority: "P0"` and include `impact:ux-release-blocker`/);
+  assert.match(prompt, /Doctor button,\s+Fix button,\s+setup wizard,\s+inline\s+recovery/);
+  assert.match(schemaDescription, /UX override:/);
+  assert.match(schemaDescription, /non-technical first-time or community user/);
+  assert.match(schemaDescription, /Doctor button, Fix button, setup wizard, inline recovery/);
+  assert.ok(impactLabelEnum.includes("impact:ux-release-blocker"));
+  assert.ok(impactLabelEnum.includes("impact:ux-friction"));
+  assert.ok(justificationLabelEnum.includes("impact:ux-release-blocker"));
+  assert.ok(justificationLabelEnum.includes("impact:ux-friction"));
 });
 
 test("ClawSweeper merge-risk label scheme exposes PR-only merge warning labels", () => {
@@ -639,10 +693,26 @@ test("ClawSweeper impact labels remove stale owned labels and preserve unrelated
   assert.deepEqual(impactLabelsForTest(["bug", "impact:auth-provider"], []), ["bug"]);
 });
 
+test("ClawSweeper maturity labels remove stale owned labels and preserve unrelated labels", () => {
+  assert.deepEqual(maturityLabelSchemeForTest(), [
+    {
+      name: "maturity:stable",
+      color: "1F883D",
+      description: "Issue affects a taxonomy feature currently scored M4/M5.",
+    },
+  ]);
+  assert.deepEqual(maturityLabelsForTest(["bug"], ["maturity:stable"]), ["bug", "maturity:stable"]);
+  assert.deepEqual(maturityLabelsForTest(["bug", "maturity:stable", "impact:security"], []), [
+    "bug",
+    "impact:security",
+  ]);
+});
+
 test("ClawSweeper impact labels do not alter PR review finding priorities", () => {
   const decision = parseDecision(
     closeDecision({
       impactLabels: ["impact:data-loss", "impact:security"],
+      maturityLabels: ["maturity:stable"],
       labelJustifications: [
         {
           label: "P2",
@@ -655,6 +725,10 @@ test("ClawSweeper impact labels do not alter PR review finding priorities", () =
         {
           label: "impact:security",
           reason: "The selected labels include a security impact classification.",
+        },
+        {
+          label: "maturity:stable",
+          reason: "taxonomy feature agent-session is currently scored M4.",
         },
       ],
       reviewFindings: [
@@ -671,6 +745,7 @@ test("ClawSweeper impact labels do not alter PR review finding priorities", () =
     }),
   );
   assert.deepEqual(decision.impactLabels, ["impact:data-loss", "impact:security"]);
+  assert.deepEqual(decision.maturityLabels, ["maturity:stable"]);
   assert.equal(decision.reviewFindings[0]?.priority, 1);
 });
 

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { readText } from "../helpers.ts";
+
 test("no-op automerge repair updates outcome and re-enters router before exit", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const noPlannedBranch = source.match(
     /if \(plannedFixActions\.length === 0\) \{(?<body>[\s\S]*?)\n\}/,
   )?.groups?.body;
@@ -30,7 +31,7 @@ test("no-op automerge repair updates outcome and re-enters router before exit", 
 
 test("repair source branch writability preflight runs before expensive repair preflights", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
 
   const branchPreflightIndex = source.indexOf(
     "const sourceBranchPreflight = preflightRepairSourceBranchWrite(fixArtifact);",
@@ -51,9 +52,39 @@ test("repair source branch writability preflight runs before expensive repair pr
   );
 });
 
+test("repair branch pushes settle and re-check the exact source head", () => {
+  const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
+  const source = readText(sourcePath);
+  const pushStart = source.indexOf("function pushRepairBranchAndUpdateStatus(");
+  const pushEnd = source.indexOf("function repairPushSettleSeconds()", pushStart);
+  assert.notEqual(pushStart, -1);
+  assert.notEqual(pushEnd, -1);
+  const push = source.slice(pushStart, pushEnd);
+
+  assert.match(source, /DEFAULT_REPAIR_PUSH_SETTLE_SECONDS = 90/);
+  assert.match(source, /CLAWSWEEPER_BRANCH_PUSH_SETTLE_SECONDS/);
+  assert.match(push, /sleepMs\(settleSeconds \* 1000\)/);
+  assert.ok(
+    push.indexOf("sleepMs(settleSeconds * 1000)") <
+      push.indexOf("const livePull = fetchPullRequest"),
+    "the live head must be fetched after the settle window",
+  );
+  assert.ok(
+    push.indexOf("repairPushSettleBlock") < push.indexOf("runGitNetwork(pushArgs, targetDir)"),
+    "the exact-head guard must run before the branch push",
+  );
+
+  const settleStart = source.indexOf("function repairPushSettleBlock(");
+  const settle = source.slice(settleStart, source.indexOf("\n}\n", settleStart) + 2);
+  assert.match(settle, /initialPull\?\.head\?\.sha/);
+  assert.match(settle, /livePull\?\.head\?\.sha/);
+  assert.match(settle, /liveState !== "open"/);
+  assert.match(settle, /requeue_required: true/);
+});
+
 test("merged source replacement skip runs before publishing replacement PRs", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
 
   const preparedStart = source.indexOf("function openReplacementPrFromPreparedRepairCheckout(");
   const preparedEnd = source.indexOf("function executeReplacementBranch(", preparedStart);
@@ -94,7 +125,7 @@ test("merged source replacement skip runs before publishing replacement PRs", ()
 
 test("terminal Codex failures do not request repair requeue", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const helperStart = source.indexOf("function isRetryableCodexFailure(");
   const helperEnd = source.indexOf("function isBlockedFixError(", helperStart);
 
@@ -116,7 +147,7 @@ test("terminal Codex failures do not request repair requeue", () => {
 
 test("repair Codex heartbeat wrapper uses bounded process capture", () => {
   const sourcePath = path.join(process.cwd(), "src/repair/execute-fix-artifact.ts");
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const source = readText(sourcePath);
   const helperStart = source.indexOf("function spawnCodexSyncWithHeartbeat(");
   const helperEnd = source.indexOf("function startCodexHeartbeat(", helperStart);
 
@@ -132,10 +163,7 @@ test("repair Codex heartbeat wrapper uses bounded process capture", () => {
 });
 
 test("issue implementation rechecks opt-out labels immediately before branch pushes", () => {
-  const source = fs.readFileSync(
-    path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"),
-    "utf8",
-  );
+  const source = readText(path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"));
   const pushStart = source.indexOf("function pushRecoverableBranch(");
   const pushEnd = source.indexOf("function fetchRemoteRecoverableBranch(", pushStart);
   const helperStart = source.indexOf("function assertIssueImplementationNotPaused(");
@@ -147,4 +175,39 @@ test("issue implementation rechecks opt-out labels immediately before branch pus
   assert.notEqual(helperStart, -1);
   assert.match(source.slice(helperStart, helperEnd), /repairPauseLabel\(issue\.labels\)/);
   assert.match(source.slice(helperStart, helperEnd), /refusing to push or open a PR/);
+});
+
+test("repair contract gates the final cumulative tree, not individual checkpoints", () => {
+  const source = readText(path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"));
+  assert.equal(
+    [...source.matchAll(/commitCheckpointIfNeeded\(/g)].length,
+    5,
+    "four checkpoint call sites plus the ordinary commit helper should remain",
+  );
+  assert.doesNotMatch(source, /commitRepairCheckpointIfNeeded|checkpointBaseHead/);
+  assert.match(source, /enforceFinalRepairContract\(\{ fixArtifact, targetDir, baseBranch \}\)/);
+  assert.equal(
+    [...source.matchAll(/pushIntermediateCheckpoint\?\.\(\)/g)].length,
+    4,
+    "contract jobs must defer all four recovery pushes until final validation",
+  );
+  assert.match(source, /if \(hasRepairContract \|\| historyCompaction\?\.status === "compacted"\)/);
+
+  const compact = source.indexOf("const historyCompaction =");
+  const enforce = source.indexOf("enforceFinalRepairContract(", compact);
+  const publish = source.indexOf("if (hasRepairContract", enforce);
+  const commit = source.indexOf('const commit = run("git", ["rev-parse", "HEAD"]', publish);
+  assert.ok(compact < enforce && enforce < publish && publish < commit);
+});
+
+test("final repair contract compares the repaired tree with the latest base", () => {
+  const source = readText(path.join(process.cwd(), "src/repair/execute-fix-artifact.ts"));
+  const start = source.indexOf("function enforceFinalRepairContract(");
+  const end = source.indexOf("function pushRecoverableBranch(", start);
+  const helper = source.slice(start, end);
+  assert.match(source, /\.\/repair-contract\.js/);
+  assert.match(helper, /const baseRef = `origin\/\$\{baseBranch\}`/);
+  assert.match(helper, /"diff", "--name-only", "-z", `\$\{baseRef\}\.\.HEAD`/);
+  assert.match(helper, /enforceRepairContract\(\{ fixArtifact, changedFiles \}\)/);
+  assert.doesNotMatch(helper, /--porcelain=v1|phase|checkpoint/);
 });

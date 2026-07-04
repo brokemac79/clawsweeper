@@ -4,6 +4,8 @@ import { promisify } from "node:util";
 import { stripAnsi } from "./comment-router-utils.js";
 import { ghCliEnv } from "./process-env.js";
 import { repoRoot } from "./paths.js";
+import { ghRetryKind, ghRetryWaitMs } from "../github-retry.js";
+import { resolveCommand } from "../command.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -131,17 +133,20 @@ export function ghPagedLimitWithRetry<T = JsonValue>(
       return ghPagedLimit<T>(apiPath, limit, resolved);
     } catch (error) {
       lastError = error;
-      if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      sleepMs(Math.min(1000 * attempt, 5000));
+      const retryKind = ghRetryKind(error);
+      if (attempt >= attempts || retryKind === "none") throw error;
+      sleepMs(ghRetryWaitMs(retryKind, attempt - 1));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 export function ghText(ghArgs: string[], options: GhRunOptions = {}): string {
-  const text = execFileSync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  const text = execFileSync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
-    env: ghEnv(options.env),
+    env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: 64 * 1024 * 1024,
@@ -159,8 +164,9 @@ export function ghTextWithRetry(ghArgs: string[], options: GhRetryOptions | numb
       return ghText(ghArgs, resolved);
     } catch (error) {
       lastError = error;
-      if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      sleepMs(Math.min(1000 * attempt, 5000));
+      const retryKind = ghRetryKind(error);
+      if (attempt >= attempts || retryKind === "none") throw error;
+      sleepMs(ghRetryWaitMs(retryKind, attempt - 1));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -178,8 +184,9 @@ export async function ghTextWithRetryAsync(
       return await ghTextAsync(ghArgs, resolved);
     } catch (error) {
       lastError = error;
-      if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      await sleepAsync(Math.min(1000 * attempt, 5000));
+      const retryKind = ghRetryKind(error);
+      if (attempt >= attempts || retryKind === "none") throw error;
+      await sleepAsync(ghRetryWaitMs(retryKind, attempt - 1));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -187,9 +194,11 @@ export async function ghTextWithRetryAsync(
 
 export async function ghTextAsync(ghArgs: string[], options: GhRunOptions = {}): Promise<string> {
   if (options.input !== undefined) return ghText(ghArgs, options);
-  const { stdout } = await execFileAsync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  const { stdout } = await execFileAsync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
-    env: ghEnv(options.env),
+    env,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -216,10 +225,12 @@ export function ghBestEffortWithRetry(
 }
 
 export function ghSpawn(ghArgs: string[], options: GhRunOptions = {}) {
-  return spawnSync("gh", ghArgs, {
+  const env = ghEnv(options.env);
+  const command = ghCommand(ghArgs, env);
+  return spawnSync(command.command, command.args, {
     cwd: options.cwd ?? repoRoot(),
     encoding: "utf8",
-    env: ghEnv(options.env),
+    env,
     input: options.input,
     stdio: "pipe",
   });
@@ -257,30 +268,16 @@ export function ghStdoutFromError(error: unknown): string {
   ).trim();
 }
 
-export function shouldRetryGh(error: unknown): boolean {
-  const text = ghErrorText(error).toLowerCase();
-  return (
-    text.includes("http 502") ||
-    text.includes("http 503") ||
-    text.includes("http 504") ||
-    text.includes("bad gateway") ||
-    text.includes("gateway timeout") ||
-    text.includes("service unavailable") ||
-    text.includes("timed out") ||
-    text.includes("timeout") ||
-    text.includes("connection reset") ||
-    text.includes("connection refused") ||
-    text.includes("could not resolve host") ||
-    text.includes("temporary failure") ||
-    text.includes("try again later") ||
-    text.includes("secondary rate limit") ||
-    text.includes("rate limit")
-  );
-}
-
 function resolveRetryOptions(options: GhRetryOptions | number): GhRetryOptions {
   if (typeof options === "number") return { attempts: options };
   return options;
+}
+
+function ghCommand(
+  ghArgs: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { command: string; args: string[] } {
+  return resolveCommand("gh", ghArgs, env);
 }
 
 function githubPathWithQueryDefaults(

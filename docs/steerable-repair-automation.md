@@ -503,6 +503,10 @@ commit, push, PR creation, label, comment, close, and merge operations.
 `CLAWSWEEPER_CRABFLEET_SERVICE_TOKEN` is used only to register or resume a
 logical action session.
 
+`CLAWSWEEPER_CRABFLEET_OWNER` identifies the active CrabFleet user principal
+that owns new action sessions. It must be configured as a repository variable;
+it is not the GitHub organization name.
+
 CrabFleet returns:
 
 - a rotated session-scoped agent token;
@@ -528,8 +532,8 @@ Current global and key lane limits:
 | Limit | Value |
 | --- | ---: |
 | Global Codex worker budget | 128 |
-| Interactive reserve | 32 |
-| Expansion reserve | 32 |
+| Interactive reserve | 16 |
+| Expansion reserve | 8 |
 | Existing repair, PR repair, and issue implementation default | 51 |
 | Imported GitCrawl cluster repair | 2 |
 | Quiet normal-review ceiling | 89 |
@@ -539,8 +543,8 @@ Important behavior:
 
 - Priority work includes repair, issue implementation, and exact-item review.
 - Background review and commit lanes shrink as priority work consumes capacity.
-- Background planners reserve future matrix expansion capacity before all shard
-  jobs appear, preventing transient over-allocation.
+- Background planners serialize per target and reserve their quiet lane before
+  shard jobs appear; publish-only runs count as zero workers so capacity refills.
 - One review shard equals one parallel Codex session. `batch_size` does not
   multiply worker concurrency inside a shard.
 - Imported GitCrawl repair remains separately capped even when the global budget
@@ -750,6 +754,7 @@ Core steerable-session configuration:
 | `CLAWSWEEPER_STEERABLE_CODEX` | Enables app-server threads, cache persistence, and CrabFleet steering. |
 | `CLAWSWEEPER_CRABFLEET_SERVICE_TOKEN` | Registers or resumes the logical action session. |
 | `CLAWSWEEPER_CRABFLEET_URL` | CrabFleet API and dashboard base URL. |
+| `CLAWSWEEPER_CRABFLEET_OWNER` | Active CrabFleet user principal for new action sessions. |
 | `CLAWSWEEPER_CODEX_TIMEOUT_MS` | Planning Codex call timeout. |
 | `CLAWSWEEPER_FIX_CODEX_TIMEOUT_MS` | Per-call execution Codex timeout. |
 | `CLAWSWEEPER_FIX_STEP_TIMEOUT_MS` | Overall fix executor step budget. |
