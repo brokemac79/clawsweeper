@@ -301,11 +301,7 @@ export function summarizeApplyReport(options: ApplyReportSummaryOptions): ApplyR
   for (const entry of actions) {
     if (entry.action === "closed") closed += 1;
     if (reportsReviewCommentSync(entry)) commentSynced += 1;
-    const productive =
-      entry.action === "closed" ||
-      entry.action === "review_comment_synced" ||
-      (entry.action === "kept_open" && isSuccessfulLabelSyncReason(entry.reason));
-    if (!productive) {
+    if (!isProductiveApplyAction(entry)) {
       skipped += 1;
       skipReasons[entry.action] = (skipReasons[entry.action] || 0) + 1;
     }
@@ -388,7 +384,7 @@ function summarizeApplyLanes(
     lane.processed += 1;
     if (entry.action === "closed") lane.closed += 1;
     if (entry.action === "review_comment_synced") lane.comment_synced += 1;
-    if (entry.action.startsWith("skipped_")) {
+    if (!isProductiveApplyAction(entry)) {
       lane.skipped += 1;
       lane.skip_reasons[entry.action] = (lane.skip_reasons[entry.action] || 0) + 1;
     }
@@ -429,6 +425,14 @@ function applyActionLane(action: string, mode: string): "closure" | "comment_syn
     return "comment_sync";
   }
   return "closure";
+}
+
+function isProductiveApplyAction(entry: ApplyAction): boolean {
+  return (
+    entry.action === "closed" ||
+    entry.action === "review_comment_synced" ||
+    (entry.action === "kept_open" && isSuccessfulLabelSyncReason(entry.reason))
+  );
 }
 
 function applyReportHealthSummary(options: {

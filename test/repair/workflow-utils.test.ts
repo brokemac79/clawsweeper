@@ -398,6 +398,10 @@ test("workflow utilities flag operator-action skips when every result is blocked
     "skipped_protected_label",
     "skipped_same_author_pair",
   ]);
+  assert.equal(summary.lanes.closure.skipped, 10);
+  assert.equal(summary.lanes.closure.skip_reasons.kept_open, 1);
+  assert.equal(summary.lanes.closure.skip_reasons.retry_pr_close_coverage_proof, 1);
+  assert.equal(summary.lanes.closure.skip_reasons.skipped_pr_close_coverage_proof, 1);
 });
 
 test("workflow utilities keep all-benign skip windows quiet", () => {
@@ -424,6 +428,11 @@ test("workflow utilities keep all-benign skip windows quiet", () => {
   assert.equal(summary.status, "ok");
   assert.equal(summary.skipped, 2);
   assert.deepEqual(summary.skip_reasons, {
+    skipped_already_closed: 1,
+    skipped_not_open: 1,
+  });
+  assert.equal(summary.lanes.closure.skipped, 2);
+  assert.deepEqual(summary.lanes.closure.skip_reasons, {
     skipped_already_closed: 1,
     skipped_not_open: 1,
   });
