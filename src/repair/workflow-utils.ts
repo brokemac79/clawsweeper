@@ -10,8 +10,109 @@ import { AUTOMATION_LIMITS, WORKER_CONFIG, workerLimit, type WorkerLane } from "
 type ApplyAction = {
   action: string;
   number?: number;
+  reason?: string;
 };
 
+type ApplyContinuationBlocker = {
+  databaseId: string;
+  status: string;
+};
+
+type ApplyContinuationBlockerOptions = {
+  currentRunId: string;
+  targetRepo: string;
+  nowMs?: number;
+};
+
+type ApplyReportSummaryOptions = {
+  reportPath: string;
+  targetRepo: string;
+  mode: string;
+  processedLimit: number;
+  closeLimit: number | null;
+  cursorPath: string;
+  cursorRequired: boolean;
+  candidateCount?: number | null;
+  cursorAdvanceCount?: number | null;
+  scheduledIntervalMinutes?: number | null;
+};
+
+type ApplyReportSummary = {
+  schema_version: 1;
+  generated_at: string;
+  target_repo: string;
+  mode: string;
+  status: "ok" | "idle" | "needs_attention";
+  summary: string;
+  processed: number;
+  processed_limit: number | null;
+  close_limit: number | null;
+  closed: number;
+  comment_synced: number;
+  skipped: number;
+  skip_reasons: Record<string, number>;
+  lanes: {
+    closure: ApplyLaneSummary;
+    comment_sync: ApplyLaneSummary;
+  };
+  next_actions: ApplySkipNextAction[];
+  next_action_buckets: Record<string, number>;
+  cycle: ApplyCycleSummary;
+  attention_reasons: string[];
+  cursor_required: boolean;
+  cursor: {
+    path: string;
+    next_after_number: number;
+    next_after_apply_checked_at: string | null;
+    updated_at: string | null;
+  } | null;
+};
+
+type ApplyLaneSummary = {
+  processed: number;
+  closed: number;
+  comment_synced: number;
+  skipped: number;
+  skip_reasons: Record<string, number>;
+};
+
+type ApplySkipNextAction = {
+  reason: string;
+  count: number;
+  bucket:
+    | "review_refresh"
+    | "close_coverage_proof"
+    | "conversation_unlock"
+    | "maintainer_review"
+    | "stable_skip"
+    | "report_quality_repair"
+    | "defer_until_closing_pr"
+    | "run_budget"
+    | "live_state_recovery"
+    | "already_resolved"
+    | "inspect";
+  owner: "clawsweeper" | "maintainer" | "github" | "none";
+  retryable: boolean;
+  label: string;
+  summary: string;
+  next_step: string;
+};
+
+type ApplySkipNextActionDetail = Omit<ApplySkipNextAction, "reason" | "count">;
+type ApplyCycleSummary = {
+  basis:
+    | "scheduled_close_cursor"
+    | "not_close_cursor"
+    | "missing_candidate_count"
+    | "missing_window_size"
+    | "no_apply_ready_candidates";
+  apply_ready_count: number | null;
+  window_size: number | null;
+  estimated_full_cycle_windows: number | null;
+  estimated_full_cycle_minutes: number | null;
+  scheduled_interval_minutes: number | null;
+  label: string;
+};
 const args = parseArgs(process.argv.slice(2));
 
 function runCli(): void {
@@ -36,6 +137,49 @@ function runCli(): void {
       break;
     case "count-actions":
       console.log(countActions(requiredString("report"), requiredString("action")));
+      break;
+    case "apply-cursor-advance-count":
+      console.log(
+        applyCursorAdvanceCount(requiredString("report"), optionalString("item-numbers")),
+      );
+      break;
+    case "apply-continuation-blocker": {
+      const blocker = applyContinuationBlocker(readJsonArray(requiredString("runs")), {
+        currentRunId: requiredString("current-run-id"),
+        targetRepo: requiredString("target-repo"),
+      });
+      printOutput({
+        APPLY_CONTINUATION_BLOCKED: blocker ? "true" : "false",
+        APPLY_CONTINUATION_BLOCKER_RUN_ID: blocker?.databaseId ?? "",
+        APPLY_CONTINUATION_BLOCKER_STATUS: blocker?.status ?? "",
+      });
+      break;
+    }
+    case "summarize-apply-report":
+      process.stdout.write(
+        `${JSON.stringify(
+          summarizeApplyReport({
+            reportPath: requiredString("report"),
+            targetRepo: requiredString("target-repo"),
+            mode: optionalString("mode") || "close",
+            processedLimit: numberArg("processed-limit", 0),
+            closeLimit: optionalString("close-limit") ? numberArg("close-limit", 0) : null,
+            cursorPath: optionalString("cursor-path"),
+            cursorRequired: booleanArg("cursor-required", false),
+            candidateCount: optionalString("candidate-count")
+              ? nonNegativeIntegerArg("candidate-count")
+              : null,
+            cursorAdvanceCount: optionalString("cursor-advance-count")
+              ? nonNegativeIntegerArg("cursor-advance-count")
+              : null,
+            scheduledIntervalMinutes: optionalString("scheduled-interval-minutes")
+              ? positiveIntegerArg("scheduled-interval-minutes")
+              : null,
+          }),
+          null,
+          2,
+        )}\n`,
+      );
       break;
     case "count-command-actions":
       console.log(
@@ -67,6 +211,9 @@ function runCli(): void {
       break;
     case "proposed-item-numbers":
       process.stdout.write(proposedItemNumbers(proposedItemOptions()).join(","));
+      break;
+    case "proposed-item-count":
+      process.stdout.write(String(proposedItemCount(proposedItemOptions())));
       break;
     case "proposed-pr-close-coverage-item-numbers":
       process.stdout.write(proposedPrCloseCoverageItemNumbers(proposedItemOptions()).join(","));
@@ -227,6 +374,487 @@ export function countActions(reportPath: string, action: string): number {
   return readApplyActions(reportPath).filter((entry) => entry.action === action).length;
 }
 
+export function applyContinuationBlocker(
+  values: readonly unknown[],
+  options: ApplyContinuationBlockerOptions,
+): ApplyContinuationBlocker | null {
+  const expectedTitle = `Apply default ClawSweeper closures for ${options.targetRepo}`;
+  const activeStatuses = new Set(["in_progress", "pending", "queued", "waiting", "requested"]);
+  const queuedStatuses = new Set(["pending", "queued", "waiting", "requested"]);
+  const staleQueuedMs = 6 * 60 * 60 * 1000;
+  const nowMs = options.nowMs ?? Date.now();
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    if (!isJsonObject(value)) continue;
+    const databaseId = String(value.databaseId ?? "");
+    if (!databaseId || seen.has(databaseId)) continue;
+    seen.add(databaseId);
+    if (databaseId === options.currentRunId) continue;
+    if (value.workflowPath !== ".github/workflows/sweep.yml") continue;
+    if (value.displayTitle !== expectedTitle) continue;
+    const status = String(value.status ?? "");
+    if (!activeStatuses.has(status)) continue;
+    if (queuedStatuses.has(status)) {
+      const updatedAt = String(value.updatedAt || value.createdAt || "");
+      const lastChangedAt = Date.parse(updatedAt);
+      if (Number.isFinite(lastChangedAt) && nowMs - lastChangedAt > staleQueuedMs) continue;
+    }
+    return { databaseId, status };
+  }
+  return null;
+}
+
+export function summarizeApplyReport(options: ApplyReportSummaryOptions): ApplyReportSummary {
+  const actions = readApplyActions(options.reportPath);
+  const lanes = summarizeApplyLanes(actions, options.mode);
+  const skipReasons: Record<string, number> = {};
+  let closed = 0;
+  let commentSynced = 0;
+  let skipped = 0;
+  for (const entry of actions) {
+    if (entry.action === "closed") closed += 1;
+    if (reportsReviewCommentSync(entry)) commentSynced += 1;
+    if (!isProductiveApplyAction(entry)) {
+      skipped += 1;
+      skipReasons[entry.action] = (skipReasons[entry.action] || 0) + 1;
+    }
+  }
+
+  const cursor = readApplyCursorForSummary(options.cursorPath);
+  const processedLimit = options.processedLimit > 0 ? options.processedLimit : null;
+  const cycle = applyCycleSummary({
+    mode: options.mode,
+    cursorRequired: options.cursorRequired,
+    candidateCount: options.candidateCount ?? null,
+    cursorAdvanceCount: options.cursorAdvanceCount ?? null,
+    scheduledIntervalMinutes: options.scheduledIntervalMinutes ?? null,
+  });
+  const attentionReasons: string[] = [];
+  if (
+    options.cursorRequired &&
+    processedLimit !== null &&
+    actions.length >= processedLimit &&
+    !cursor
+  ) {
+    attentionReasons.push("cursor_required_but_missing_after_full_window");
+  }
+  for (const reason of ["skipped_runtime_budget", "skipped_live_fetch_failed"]) {
+    if ((skipReasons[reason] || 0) > 0) attentionReasons.push(reason);
+  }
+  if (actions.length > 0 && skipped === actions.length) {
+    const benignSkipReasons = new Set([
+      "skipped_already_closed",
+      "skipped_closed",
+      "skipped_not_open",
+    ]);
+    for (const reason of Object.keys(skipReasons).sort()) {
+      if (!benignSkipReasons.has(reason) && !attentionReasons.includes(reason)) {
+        attentionReasons.push(reason);
+      }
+    }
+  }
+  const nextActions = applySkipNextActions(skipReasons);
+
+  const status =
+    actions.length === 0 ? "idle" : attentionReasons.length > 0 ? "needs_attention" : "ok";
+  const summary = applyReportHealthSummary({
+    status,
+    processed: actions.length,
+    processedLimit,
+    closed,
+    commentSynced,
+    skipped,
+    cursor,
+    attentionReasons,
+  });
+
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    target_repo: options.targetRepo,
+    mode: options.mode,
+    status,
+    summary,
+    processed: actions.length,
+    processed_limit: processedLimit,
+    close_limit: options.closeLimit,
+    closed,
+    comment_synced: commentSynced,
+    skipped,
+    skip_reasons: Object.fromEntries(
+      Object.entries(skipReasons).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    lanes,
+    next_actions: nextActions,
+    next_action_buckets: applyNextActionBuckets(nextActions),
+    cycle,
+    attention_reasons: attentionReasons,
+    cursor_required: options.cursorRequired,
+    cursor,
+  };
+}
+
+function summarizeApplyLanes(
+  actions: ApplyAction[],
+  mode: string,
+): { closure: ApplyLaneSummary; comment_sync: ApplyLaneSummary } {
+  const lanes = {
+    closure: emptyApplyLaneSummary(),
+    comment_sync: emptyApplyLaneSummary(),
+  };
+  for (const entry of actions) {
+    const laneName = applyActionLane(entry.action, mode);
+    const lane = lanes[laneName];
+    lane.processed += 1;
+    if (entry.action === "closed") lane.closed += 1;
+    if (reportsReviewCommentSync(entry)) lane.comment_synced += 1;
+    if (!isProductiveApplyAction(entry)) {
+      lane.skipped += 1;
+      lane.skip_reasons[entry.action] = (lane.skip_reasons[entry.action] || 0) + 1;
+    }
+  }
+  return {
+    closure: sortApplyLaneSummary(lanes.closure),
+    comment_sync: sortApplyLaneSummary(lanes.comment_sync),
+  };
+}
+
+function emptyApplyLaneSummary(): ApplyLaneSummary {
+  return {
+    processed: 0,
+    closed: 0,
+    comment_synced: 0,
+    skipped: 0,
+    skip_reasons: {},
+  };
+}
+
+function sortApplyLaneSummary(lane: ApplyLaneSummary): ApplyLaneSummary {
+  return {
+    ...lane,
+    skip_reasons: Object.fromEntries(
+      Object.entries(lane.skip_reasons).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  };
+}
+
+function applyActionLane(action: string, mode: string): "closure" | "comment_sync" {
+  if (
+    String(mode || "").toLowerCase() === "comment_sync" ||
+    action === "review_comment_synced" ||
+    action === "skipped_comment_auth" ||
+    action === "skipped_locked_conversation" ||
+    action === "skipped_stale_review_comment_sync"
+  ) {
+    return "comment_sync";
+  }
+  return "closure";
+}
+
+function isProductiveApplyAction(entry: ApplyAction): boolean {
+  return (
+    entry.action === "closed" ||
+    entry.action === "review_comment_synced" ||
+    (entry.action === "kept_open" && isSuccessfulLabelSyncReason(entry.reason))
+  );
+}
+
+function applySkipNextActions(skipReasons: Record<string, number>): ApplySkipNextAction[] {
+  return Object.entries(skipReasons)
+    .filter(([, count]) => Number.isFinite(count) && count > 0)
+    .map(([reason, count]) => applySkipNextAction(reason, count))
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        applyNextActionBucketRank(left.bucket) - applyNextActionBucketRank(right.bucket) ||
+        left.reason.localeCompare(right.reason),
+    );
+}
+
+function applyNextActionBuckets(actions: ApplySkipNextAction[]): Record<string, number> {
+  const buckets: Record<string, number> = {};
+  for (const action of actions) {
+    buckets[action.bucket] = (buckets[action.bucket] || 0) + action.count;
+  }
+  return Object.fromEntries(
+    Object.entries(buckets).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function applyNextActionBucketRank(bucket: ApplySkipNextAction["bucket"]): number {
+  return [
+    "live_state_recovery",
+    "run_budget",
+    "review_refresh",
+    "close_coverage_proof",
+    "report_quality_repair",
+    "defer_until_closing_pr",
+    "conversation_unlock",
+    "maintainer_review",
+    "stable_skip",
+    "already_resolved",
+    "inspect",
+  ].indexOf(bucket);
+}
+
+const APPLY_SKIP_NEXT_ACTION_DETAILS: Record<string, ApplySkipNextActionDetail> = {
+  skipped_changed_since_review: {
+    bucket: "review_refresh",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Refresh review",
+    summary: "The item changed after the review that proposed closing it.",
+    next_step: "Queue a fresh ClawSweeper review before any close retry.",
+  },
+  skipped_stale_review_comment_sync: {
+    bucket: "review_refresh",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Refresh review state",
+    summary: "The durable review comment is newer than the local review report.",
+    next_step: "Queue a fresh review instead of overwriting the newer durable comment.",
+  },
+  skipped_pr_close_coverage_proof: {
+    bucket: "close_coverage_proof",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Add close proof",
+    summary: "The PR close proposal needs positive coverage proof before apply can close it.",
+    next_step: "Run or refresh close-coverage proof for the canonical and covered PR pair.",
+  },
+  retry_pr_close_coverage_proof: {
+    bucket: "close_coverage_proof",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Retry close proof",
+    summary: "The close-coverage proof check failed transiently before reaching a decision.",
+    next_step: "Inspect the proof failure, then retry after model and GitHub access recover.",
+  },
+  skipped_protected_label: maintainerDecisionAction(),
+  skipped_policy_exempt: maintainerDecisionAction(),
+  skipped_maintainer_authored: {
+    bucket: "maintainer_review",
+    owner: "maintainer",
+    retryable: false,
+    label: "Maintainer-authored",
+    summary: "Automation does not close maintainer-authored items without human judgement.",
+    next_step: "Route to maintainer review or close manually if the owner agrees.",
+  },
+  skipped_locked_conversation: {
+    bucket: "conversation_unlock",
+    owner: "maintainer",
+    retryable: false,
+    label: "Conversation locked",
+    summary: "GitHub blocked the durable comment write because the conversation is locked.",
+    next_step: "Unlock the conversation before retrying comment sync, or leave it unchanged.",
+  },
+  skipped_same_author_pair: {
+    bucket: "stable_skip",
+    owner: "none",
+    retryable: false,
+    label: "Stable skip",
+    summary:
+      "The source and canonical items have the same author, so automated duplicate close is intentionally conservative.",
+    next_step: "Leave as a stable skip unless maintainers change the same-author close policy.",
+  },
+  skipped_invalid_decision: reportRepairAction(),
+  skipped_missing_record: reportRepairAction(),
+  skipped_open_closing_pr: {
+    bucket: "defer_until_closing_pr",
+    owner: "github",
+    retryable: false,
+    label: "Wait for closing PR",
+    summary: "The item appears covered by a pull request that is still open.",
+    next_step: "Defer until the linked closing PR merges, closes, or changes state.",
+  },
+  skipped_runtime_budget: {
+    bucket: "run_budget",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Runtime budget",
+    summary: "The apply lane stopped because it reached its bounded runtime.",
+    next_step: "Let the next scheduled run continue; tune runtime or batch size if this repeats.",
+  },
+  skipped_live_fetch_failed: {
+    bucket: "live_state_recovery",
+    owner: "github",
+    retryable: true,
+    label: "Recover live check",
+    summary: "ClawSweeper could not confirm live GitHub state before mutating.",
+    next_step: "Inspect auth, API, or rate-limit failures and retry after live checks recover.",
+  },
+  skipped_comment_auth: {
+    bucket: "live_state_recovery",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Repair comment auth",
+    summary: "GitHub rejected the durable review comment write as unauthenticated.",
+    next_step: "Repair the GitHub App write token before retrying comment sync.",
+  },
+  skipped_not_open: alreadyResolvedAction(),
+  skipped_already_closed: alreadyResolvedAction(),
+  skipped_closed: alreadyResolvedAction(),
+};
+
+function applySkipNextAction(reason: string, count: number): ApplySkipNextAction {
+  const detail = APPLY_SKIP_NEXT_ACTION_DETAILS[reason] ?? {
+    bucket: "inspect",
+    owner: "maintainer",
+    retryable: false,
+    label: "Inspect skip",
+    summary: "Apply reported an unmapped skip bucket.",
+    next_step: "Inspect the workflow run and add a deterministic mapping if this repeats.",
+  };
+  return { reason, count, ...detail };
+}
+
+function maintainerDecisionAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "maintainer_review",
+    owner: "maintainer",
+    retryable: false,
+    label: "Maintainer decision",
+    summary: "A protected label or policy exemption blocks automated pruning.",
+    next_step: "Confirm the policy should remain, or close manually if it should not.",
+  };
+}
+
+function reportRepairAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "report_quality_repair",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Repair review report",
+    summary: "The durable review record is missing or invalid for apply.",
+    next_step: "Queue a fresh review so apply receives a complete, valid decision.",
+  };
+}
+
+function alreadyResolvedAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "already_resolved",
+    owner: "none",
+    retryable: false,
+    label: "Already resolved",
+    summary: "The item was not open by the time apply checked it.",
+    next_step: "No action is needed unless this bucket dominates repeated runs.",
+  };
+}
+
+function applyCycleSummary(options: {
+  mode: string;
+  cursorRequired: boolean;
+  candidateCount: number | null;
+  cursorAdvanceCount: number | null;
+  scheduledIntervalMinutes: number | null;
+}): ApplyCycleSummary {
+  const closeCursorMode =
+    String(options.mode || "").toLowerCase() === "close" && options.cursorRequired;
+  const windowSize =
+    options.cursorAdvanceCount !== null && options.cursorAdvanceCount > 0
+      ? options.cursorAdvanceCount
+      : null;
+  const cadence = options.scheduledIntervalMinutes;
+  if (!closeCursorMode) {
+    return {
+      basis: "not_close_cursor",
+      apply_ready_count: options.candidateCount,
+      window_size: windowSize,
+      estimated_full_cycle_windows: null,
+      estimated_full_cycle_minutes: null,
+      scheduled_interval_minutes: cadence,
+      label: "Cycle estimate is only reported for scheduled close cursor windows.",
+    };
+  }
+  if (options.candidateCount === null) {
+    return {
+      basis: "missing_candidate_count",
+      apply_ready_count: null,
+      window_size: windowSize,
+      estimated_full_cycle_windows: null,
+      estimated_full_cycle_minutes: null,
+      scheduled_interval_minutes: cadence,
+      label:
+        "Cycle estimate is unavailable because the apply-ready candidate count was not recorded.",
+    };
+  }
+  if (options.candidateCount === 0) {
+    return {
+      basis: "no_apply_ready_candidates",
+      apply_ready_count: 0,
+      window_size: windowSize,
+      estimated_full_cycle_windows: 0,
+      estimated_full_cycle_minutes: 0,
+      scheduled_interval_minutes: cadence,
+      label: "No apply-ready close candidates are waiting in this lane.",
+    };
+  }
+  if (!windowSize) {
+    return {
+      basis: "missing_window_size",
+      apply_ready_count: options.candidateCount,
+      window_size: null,
+      estimated_full_cycle_windows: null,
+      estimated_full_cycle_minutes: null,
+      scheduled_interval_minutes: cadence,
+      label: "Cycle estimate is unavailable because no scan window size was recorded.",
+    };
+  }
+  const windows = Math.ceil(options.candidateCount / windowSize);
+  const minutes = cadence && cadence > 0 ? windows * cadence : null;
+  return {
+    basis: "scheduled_close_cursor",
+    apply_ready_count: options.candidateCount,
+    window_size: windowSize,
+    estimated_full_cycle_windows: windows,
+    estimated_full_cycle_minutes: minutes,
+    scheduled_interval_minutes: cadence,
+    label: cycleLabel(options.candidateCount, windowSize, windows, minutes, cadence),
+  };
+}
+
+function cycleLabel(
+  candidateCount: number,
+  windowSize: number,
+  windows: number,
+  minutes: number | null,
+  cadence: number | null,
+): string {
+  const base = `${candidateCount} apply-ready close candidates at ${windowSize} records per latest cursor advance: about ${windows} window${windows === 1 ? "" : "s"}`;
+  if (!minutes || !cadence) return `${base}.`;
+  return `${base}; scheduled cadence alone would take roughly ${durationLabel(minutes)} at ${cadence}-minute intervals, while successful windows can continue sooner.`;
+}
+
+function durationLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder === 0 ? `${hours}h` : `${hours}h ${remainder}m`;
+}
+function applyReportHealthSummary(options: {
+  status: ApplyReportSummary["status"];
+  processed: number;
+  processedLimit: number | null;
+  closed: number;
+  commentSynced: number;
+  skipped: number;
+  cursor: ApplyReportSummary["cursor"];
+  attentionReasons: string[];
+}): string {
+  if (options.status === "idle") return "Apply processed no records in this run.";
+  const budget =
+    options.processedLimit === null
+      ? `${options.processed} processed`
+      : `${options.processed}/${options.processedLimit} processed`;
+  const cursorText = options.cursor
+    ? `cursor at #${options.cursor.next_after_number}`
+    : "no cursor recorded";
+  const base = `${budget}; ${options.closed} closed, ${options.commentSynced} comments synced, ${options.skipped} skipped; ${cursorText}.`;
+  if (options.attentionReasons.length === 0) return base;
+  return `${base} Attention: ${options.attentionReasons.join(", ")}.`;
+}
+
 export function countCommandActions(reportPath: string, action: string, status = ""): number {
   const report = readJsonObject(reportPath);
   const commands: JsonValue[] = Array.isArray(report.commands) ? report.commands : [];
@@ -284,6 +912,11 @@ type CommentSyncBatchOptions = {
 
 export function proposedItemNumbers(options: ProposedItemOptions): number[] {
   return selectedProposedItemCandidates(options, "all").map((candidate) => candidate.number);
+}
+
+export function proposedItemCount(options: ProposedItemOptions): number {
+  return selectedProposedItemCandidates({ ...options, batchSize: null, cursorPath: null }, "all")
+    .length;
 }
 
 export function proposedPrCloseCoverageItemNumbers(options: ProposedItemOptions): number[] {
@@ -574,6 +1207,7 @@ export function writeCommentSyncCursor(
 type ApplyCursor = {
   applyCheckedAt: string;
   number: number;
+  updatedAt: string | null;
 };
 
 function readApplyCursor(cursorPath: string): ApplyCursor | null {
@@ -586,7 +1220,20 @@ function readApplyCursor(cursorPath: string): ApplyCursor | null {
     typeof parsed.next_after_apply_checked_at === "string"
       ? parsed.next_after_apply_checked_at
       : "";
-  return { number, applyCheckedAt };
+  const updatedAt = typeof parsed.updated_at === "string" ? parsed.updated_at : null;
+  return { number, applyCheckedAt, updatedAt };
+}
+
+function readApplyCursorForSummary(cursorPath: string): ApplyReportSummary["cursor"] {
+  if (!cursorPath) return null;
+  const cursor = readApplyCursor(cursorPath);
+  if (!cursor) return null;
+  return {
+    path: cursorPath,
+    next_after_number: cursor.number,
+    next_after_apply_checked_at: cursor.applyCheckedAt || null,
+    updated_at: cursor.updatedAt,
+  };
 }
 
 export function writeApplyCursor(
@@ -595,19 +1242,7 @@ export function writeApplyCursor(
   targetRepo: string,
   itemNumbers = "",
 ): void {
-  const actions = readApplyActions(reportPath);
-  const processed = actions.flatMap((action) =>
-    typeof action.number === "number" ? [action.number] : [],
-  );
-  const selected = csvItems(itemNumbers)
-    .map((item) => Number(item))
-    .filter((number) => Number.isInteger(number) && number > 0);
-  const processedSet = new Set(processed);
-  const number =
-    selected.filter((itemNumber) => processedSet.has(itemNumber)).at(-1) ??
-    selected.at(-1) ??
-    processed.at(-1) ??
-    0;
+  const { number } = applyCursorAdvance(reportPath, itemNumbers);
   const applyCheckedAt = number > 0 ? applyCheckedAtForItem(targetRepo, number) : "";
   fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
   fs.writeFileSync(
@@ -623,6 +1258,35 @@ export function writeApplyCursor(
       2,
     )}\n`,
   );
+}
+
+export function applyCursorAdvanceCount(reportPath: string, itemNumbers = ""): number {
+  return applyCursorAdvance(reportPath, itemNumbers).count;
+}
+
+function applyCursorAdvance(
+  reportPath: string,
+  itemNumbers: string,
+): { number: number; count: number } {
+  const processed = readApplyActions(reportPath).flatMap((action) =>
+    typeof action.number === "number" ? [action.number] : [],
+  );
+  const selected = csvItems(itemNumbers)
+    .map((item) => Number(item))
+    .filter((number) => Number.isInteger(number) && number > 0);
+  if (selected.length === 0) {
+    return {
+      number: processed.at(-1) ?? 0,
+      count: new Set(processed).size,
+    };
+  }
+  const processedSet = new Set(processed);
+  const lastProcessedIndex = selected.findLastIndex((number) => processedSet.has(number));
+  const cursorIndex = lastProcessedIndex >= 0 ? lastProcessedIndex : selected.length - 1;
+  return {
+    number: selected[cursorIndex] ?? 0,
+    count: cursorIndex + 1,
+  };
 }
 
 function applyCheckedAtForItem(targetRepo: string, itemNumber: number): string {
@@ -707,10 +1371,25 @@ function readApplyActions(reportPath: string): ApplyAction[] {
   if (!Array.isArray(parsed)) throw new Error(`${reportPath} must contain an array`);
   return parsed.map((entry) => {
     if (!isJsonObject(entry) || typeof entry.action !== "string") return { action: "" };
+    const action: ApplyAction = { action: entry.action };
+    if (typeof entry.reason === "string") action.reason = entry.reason;
     const number = Number(entry.number);
-    if (!Number.isInteger(number) || number <= 0) return { action: entry.action };
-    return { action: entry.action, number };
+    if (Number.isInteger(number) && number > 0) action.number = number;
+    return action;
   });
+}
+
+function isSuccessfulLabelSyncReason(reason: string | undefined): boolean {
+  return /^(?:synced|dry-run: would sync) (?:advisory issue|ClawSweeper) labels$/.test(
+    reason || "",
+  );
+}
+
+function reportsReviewCommentSync(entry: ApplyAction): boolean {
+  return (
+    entry.action === "review_comment_synced" ||
+    (entry.reason || "").split("; ").includes("updated durable Codex review comment")
+  );
 }
 
 function resultFiles(reportDir: string): string[] {
@@ -731,6 +1410,12 @@ function resultActions(reportPath: string): LooseRecord[] {
 function readJsonObject(filePath: string): LooseRecord {
   const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
   if (!isJsonObject(parsed)) throw new Error(`${filePath} must contain a JSON object`);
+  return parsed;
+}
+
+function readJsonArray(filePath: string): unknown[] {
+  const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error(`${filePath} must contain a JSON array`);
   return parsed;
 }
 
@@ -760,6 +1445,30 @@ function numberArg(name: string, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`--${name} must be numeric`);
   return parsed;
+}
+
+function nonNegativeIntegerArg(name: string): number {
+  const parsed = numberArg(name, 0);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`--${name} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+function positiveIntegerArg(name: string): number {
+  const parsed = numberArg(name, 0);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function booleanArg(name: string, fallback: boolean): boolean {
+  const value = optionalString(name).toLowerCase();
+  if (!value) return fallback;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`--${name} must be boolean`);
 }
 
 function positiveNumber(value: string, fallback: number): number {

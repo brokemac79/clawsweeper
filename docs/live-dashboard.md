@@ -125,13 +125,26 @@ is absent or a cache event lands in another Cloudflare colo.
 - recent automerge command-to-merge timing samples
 - explicit workflow status events posted to the ingest API when KV ingest is
   enabled
+- problem-focused pruning alerts from latest sweep status files when apply runs
+  report blocked or degraded progress, with reason tooltips and maintainer
+  workflow commands for safe follow-up
+- lane-level apply health in status JSON so closure processing and durable
+  review-comment sync are reported separately even when they share the same
+  applicator
+- skip next-action buckets in apply health JSON so stale reviews, missing close
+  proof, protected labels, stable skips, invalid reports, and open closing PRs
+  are discoverable without reading individual item records
+- scheduled close-cycle telemetry in apply-health JSON, including current
+  apply-ready candidate count and an estimated number of cursor windows to
+  revisit the close queue; scheduled cadence time is explanatory only because
+  successful windows can dispatch immediate continuations
 
 The Worker fetches job details only for the bounded active-run set, limits that
 GitHub fanout to 12 concurrent requests, and caches each run's jobs for 60
 seconds. It separately samples 20 recent completed worker runs with ten-way
 fanout and caches error/recovery telemetry for 120 seconds. This bounds
-telemetry pressure without exceeding the 32-worker fleet budget. Worker details
-paginate up to 300 jobs per workflow run so 22-shard runs remain fully visible,
+telemetry pressure without exceeding the 128-worker fleet budget. Worker details
+paginate up to 300 jobs per workflow run so 89-shard runs remain fully visible,
 then finish before optional pipeline CI and historical
 enrichment begin, so those secondary lookups do not compete with active worker
 telemetry. If GitHub job telemetry is unavailable, the API and UI retain the

@@ -14,7 +14,7 @@ import {
   triageRoutingGroupsForLabels,
 } from "../dashboard/triage-routing-groups.ts";
 
-test("exact-review queue defaults to 20 of the 32 global workers", () => {
+test("exact-review queue defaults to 20 of the 128 global workers", () => {
   assert.equal(exactReviewQueueCapacity({}), 20);
   assert.equal(exactReviewQueueCapacity({ EXACT_REVIEW_QUEUE_MAX_CONCURRENT: "32" }), 32);
   assert.equal(exactReviewQueueCapacity({ EXACT_REVIEW_QUEUE_MAX_CONCURRENT: "100" }), 32);
@@ -32,6 +32,14 @@ test("triage routing groups classify impact labels without forcing one primary g
   assert.deepEqual(
     triageRoutingGroupsForLabels(["impact:unknown"]).map((group) => group.id),
     ["unclassified"],
+  );
+  assert.deepEqual(
+    triageRoutingGroupsForLabels(["impact:ux-release-blocker"]).map((group) => group.id),
+    ["user-experience"],
+  );
+  assert.deepEqual(
+    triageRoutingGroupsForLabels([{ name: "impact:ux-friction" }]).map((group) => group.id),
+    ["user-experience"],
   );
   assert.equal(TRIAGE_ROUTING_GROUPS.at(-1)?.id, "unclassified");
 });
@@ -746,6 +754,15 @@ test("dashboard HTML preserves UTF-8 emoji labels", async () => {
   assert.match(html, /href="https:\/\/fleet\.example\.test\/terminal\?view=live&amp;mode=all"/);
   assert.match(html, /🌊 Loading pipeline state/);
   assert.match(html, /System Overview/);
+  assert.match(html, /id="apply-health"/);
+  assert.match(html, /function renderApplyHealth/);
+  assert.match(html, /Pruning sweep/);
+  assert.match(html, /Copy command/);
+  assert.match(html, /applyHealthRecommendedAction/);
+  assert.match(html, /Rotation cursor missing/);
+  assert.match(html, /Inspect the cursor-write and state-publish steps/);
+  assert.match(html, /const skipCount = skipReasons\[reason\]/);
+  assert.doesNotMatch(html, /Apply needs attention/);
   assert.match(html, /Automatic Builds/);
   assert.match(html, /id="automatic-work"/);
   assert.match(html, /Lifecycle Timeline/);
@@ -1478,6 +1495,151 @@ test("dashboard exposes scheduled cluster intake markers and runs", async () => 
       "abc123def4",
     );
     assert.equal(status.recent.cluster_repair.latest_runs[0].url, marker.run_url);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
+  }
+});
+
+test("dashboard exposes apply health from sweep status without broad scans", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalCaches = globalThis.caches;
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    value: {
+      default: {
+        match: async () => undefined,
+        put: async () => undefined,
+      },
+    },
+  });
+  const sweepStatus = {
+    target_repo: "openclaw/openclaw",
+    state: "Apply finished",
+    run_url: "https://github.com/openclaw/clawsweeper/actions/runs/99",
+    updated_at: "2026-07-03T10:15:00Z",
+    apply_health: {
+      mode: "close",
+      status: "needs_attention",
+      summary: "2/2 processed; 0 closed, 0 comments synced, 2 skipped; no cursor recorded.",
+      processed: 2,
+      processed_limit: 2,
+      close_limit: 5,
+      closed: 0,
+      comment_synced: 0,
+      skipped: 2,
+      cursor_required: true,
+      skip_reasons: {
+        skipped_changed_since_review: 2,
+      },
+      lanes: {
+        closure: {
+          processed: 2,
+          closed: 0,
+          comment_synced: 0,
+          skipped: 2,
+          skip_reasons: {
+            skipped_changed_since_review: 2,
+          },
+        },
+        comment_sync: {
+          processed: 0,
+          closed: 0,
+          comment_synced: 0,
+          skipped: 0,
+          skip_reasons: {},
+        },
+      },
+      next_actions: [
+        {
+          reason: "skipped_changed_since_review",
+          count: 2,
+          bucket: "review_refresh",
+          owner: "clawsweeper",
+          retryable: true,
+          label: "Refresh review",
+          summary: "The item changed after the review that proposed closing it.",
+          next_step: "Queue a fresh ClawSweeper review before any close retry.",
+        },
+      ],
+      next_action_buckets: {
+        review_refresh: 2,
+      },
+      cycle: {
+        basis: "scheduled_close_cursor",
+        apply_ready_count: 1200,
+        window_size: 300,
+        estimated_full_cycle_windows: 4,
+        estimated_full_cycle_minutes: null,
+        scheduled_interval_minutes: null,
+        label:
+          "1200 apply-ready close candidates at 300 records per latest cursor advance: about 4 windows.",
+      },
+      attention_reasons: ["cursor_required_but_missing_after_full_window"],
+      cursor: null,
+    },
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/repos/openclaw/clawsweeper/actions/runs") {
+      return jsonResponse({ workflow_runs: [] });
+    }
+    if (
+      url.pathname ===
+      "/repos/openclaw/clawsweeper/actions/workflows/repair-cluster-intake.yml/runs"
+    ) {
+      return jsonResponse({ workflow_runs: [] });
+    }
+    if (
+      url.pathname ===
+      "/repos/openclaw/clawsweeper-state/contents/results/sweep-status/openclaw-openclaw.json"
+    ) {
+      assert.equal(url.searchParams.get("ref"), "state");
+      return jsonResponse({
+        content: Buffer.from(JSON.stringify(sweepStatus)).toString("base64"),
+      });
+    }
+    if (url.pathname === "/search/issues") return jsonResponse({ items: [] });
+    if (url.pathname === "/repos/openclaw/openclaw/issues") return jsonResponse([]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  try {
+    const response = await worker.fetch(new Request("https://clawsweeper.openclaw.ai/api/status"), {
+      STATUS_STORE: new MemoryKv(),
+      CLAWSWEEPER_REPO: "openclaw/clawsweeper",
+      TARGET_REPOS: "openclaw/openclaw",
+      CACHE_TTL_SECONDS: "0",
+    });
+    assert.equal(response.status, 200);
+    const status = await response.json();
+    assert.equal(status.recent.apply_health.attention_count, 1);
+    assert.equal(status.recent.apply_health.items[0].status, "needs_attention");
+    assert.equal(status.recent.apply_health.items[0].processed, 2);
+    assert.equal(status.recent.apply_health.items[0].cursor_required, true);
+    assert.deepEqual(status.recent.apply_health.items[0].skip_reasons, {
+      skipped_changed_since_review: 2,
+    });
+    assert.deepEqual(status.recent.apply_health.items[0].lanes.closure, {
+      processed: 2,
+      closed: 0,
+      comment_synced: 0,
+      skipped: 2,
+      skip_reasons: {
+        skipped_changed_since_review: 2,
+      },
+    });
+    assert.equal(status.recent.apply_health.items[0].lanes.comment_sync.processed, 0);
+    assert.deepEqual(status.recent.apply_health.items[0].next_action_buckets, {
+      review_refresh: 2,
+    });
+    assert.equal(
+      status.recent.apply_health.items[0].next_actions[0].next_step,
+      "Queue a fresh ClawSweeper review before any close retry.",
+    );
+    assert.equal(status.recent.apply_health.items[0].cycle.estimated_full_cycle_minutes, null);
+    assert.equal(status.recent.apply_health.items[0].cycle.apply_ready_count, 1200);
+    assert.equal(status.recent.apply_health.items[0].cursor, null);
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
@@ -2375,7 +2537,7 @@ test("dashboard counts active runs that are older than the latest unfiltered pag
     assert.equal(status.fleet.queued_workflow_runs, 1);
     assert.equal(status.fleet.support_workflow_runs, 3);
     assert.equal(status.fleet.support_queued_workflow_runs, 1);
-    assert.equal(status.fleet.worker_budget, 32);
+    assert.equal(status.fleet.worker_budget, 128);
     assert.deepEqual(
       status.pipeline.map((row: { id: number }) => row.id),
       [2, 4, 3],

@@ -136,9 +136,15 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
     applyJob.indexOf("- name: Queue review backstops"),
   );
 
-  assert.match(inputBlock, /apply_limit:[\s\S]*default: "5"/);
-  assert.match(inputBlock, /apply_checkpoint_size:[\s\S]*default: "5"/);
-  assert.match(applyStep, /Capping apply checkpoint size at 5/);
+  assert.match(workflow, /format\('Apply default ClawSweeper closures for \{0\}'/);
+  assert.match(workflow, /format\('Apply custom ClawSweeper closures for \{0\}'/);
+  assert.match(
+    workflow,
+    /github\.event\.schedule == '8,23,38,53 \* \* \* \*'\) && 'openclaw\/clawhub'/,
+  );
+  assert.match(inputBlock, /apply_limit:[\s\S]*default: "20"/);
+  assert.match(inputBlock, /apply_checkpoint_size:[\s\S]*default: "20"/);
+  assert.match(applyStep, /Capping apply checkpoint size at 20/);
   assert.match(applyStep, /close_processed_limit=300/);
   assert.match(applyStep, /processed-limit "\$close_processed_limit"/);
   assert.match(applyStep, /comment_sync_processed_limit=1000/);
@@ -147,6 +153,21 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
   assert.ok(applyFlagInit > applyStep.indexOf('item_numbers="${{'));
   assert.ok(applyFlagInit < applyStep.indexOf("auto_selected_apply_batch=true"));
   assert.match(applyStep, /apply_cursor_path="results\/apply-cursors\/\$\{target_slug\}\.json"/);
+  assert.match(applyStep, /write_apply_health\(\)/);
+  assert.match(applyStep, /proposed-item-count/);
+  assert.match(applyStep, /apply-cursor-advance-count/);
+  assert.match(applyStep, /--candidate-count "\$health_candidate_count"/);
+  assert.match(applyStep, /--cursor-advance-count "\$health_cursor_advance_count"/);
+  assert.match(applyStep, /--scheduled-interval-minutes "\$health_scheduled_interval_minutes"/);
+  assert.match(applyStep, /pnpm run --silent workflow -- summarize-apply-report/);
+  assert.match(applyStep, /health_cursor_path="\$\{5:-\}"/);
+  assert.match(applyStep, /comment_sync_health_cursor_path="\$cursor_path"/);
+  assert.match(applyStep, /comment_sync_health_cursor_required="true"/);
+  assert.match(applyStep, /comment_sync_health_processed_limit="\$sync_batch_size"/);
+  assert.match(applyStep, /close_health_cursor_path="\$apply_cursor_path"/);
+  assert.match(applyStep, /--apply-health-file "\.artifacts\/apply-health-\$checkpoint\.json"/);
+  assert.match(applyStep, /--apply-health-file "\.artifacts\/apply-health-final\.json"/);
+  assert.match(applyStep, /--state "Apply idle"/);
   assert.match(applyStep, /--batch-size "\$close_processed_limit"/);
   assert.match(applyStep, /--cursor-path "\$apply_cursor_path"/);
   assert.match(applyStep, /write-apply-cursor/);
@@ -170,6 +191,24 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
   assert.match(applyStep, /echo "APPLY_CONTINUE=\$continue_apply"/);
   assert.match(applyStep, /echo "APPLY_AUTO_SELECTED_BATCH=\$auto_selected_apply_batch"/);
   assert.match(continueStep, /APPLY_CONTINUE:-false/);
+  assert.match(continueStep, /can_share_apply_continuation=false/);
+  assert.match(continueStep, /\[ "\$\{APPLY_AUTO_SELECTED_BATCH:-false\}" = "true" \]/);
+  assert.match(continueStep, /\[ -z "\$\{APPLY_ITEM_NUMBERS:-\}" \]/);
+  assert.match(continueStep, /\[ "\$\{APPLY_COMMENT_SYNC_MIN_AGE_DAYS:-7\}" = "7" \]/);
+  assert.match(continueStep, /preserving exact continuation dispatch/);
+  assert.match(
+    continueStep,
+    /gh api --paginate "repos\/\$\{\{ github\.repository \}\}\/actions\/runs\?per_page=100&status=\$\{run_status\}"/,
+  );
+  assert.match(continueStep, /workflowPath:\.path/);
+  assert.doesNotMatch(continueStep, /workflowName:\.name/);
+  assert.doesNotMatch(continueStep, /gh run list/);
+  assert.match(continueStep, /pnpm run --silent workflow -- apply-continuation-blocker/);
+  assert.match(continueStep, /--current-run-id "\$\{\{ github\.run_id \}\}"/);
+  assert.match(continueStep, /--target-repo "\$\{APPLY_TARGET_REPO:-openclaw\/openclaw\}"/);
+  assert.match(continueStep, /APPLY_CONTINUATION_BLOCKED/);
+  assert.match(continueStep, /existing default cursor run will continue the lane/);
+  assert.match(continueStep, /already covered by \$/);
   assert.match(continueStep, /-f apply_item_numbers="\$APPLY_ITEM_NUMBERS"/);
   assert.doesNotMatch(continueStep, /APPLY_CLOSED_TOTAL:-0.*APPLY_LIMIT:-0/);
 });
@@ -608,7 +647,8 @@ test("review capacity probes use REST actions run listing", () => {
     assert.match(block, /actions\/runs\?per_page=100/);
     assert.match(block, /--paginate/);
     assert.match(block, /status=\$\{run_status\}/);
-    assert.match(block, /workflowName:\.name/);
+    assert.match(block, /workflowPath:\.path/);
+    assert.doesNotMatch(block, /workflowName:\.name/);
     assert.match(block, /displayTitle:\.display_title/);
     assert.match(block, /createdAt:\.created_at/);
     assert.match(block, /updatedAt:\.updated_at/);
@@ -634,6 +674,13 @@ test("background review capacity reserves expanding matrices and caps broad manu
   assert.match(modeBlock, /limit review_shards\.normal_default/);
   assert.match(modeBlock, /STALE_QUEUED_CUTOFF/);
   assert.match(modeBlock, /updatedAt:\.updated_at/);
+  assert.match(modeBlock, /workflowPath == "\.github\/workflows\/sweep\.yml"/);
+  assert.match(modeBlock, /WORKFLOW_PATH="\$1"/);
+  assert.doesNotMatch(modeBlock, /workflowName == "ClawSweeper"/);
+  assert.doesNotMatch(modeBlock, /WORKFLOW_NAME="\$1"/);
+  assert.match(modeBlock, /total_shards/);
+  assert.match(modeBlock, /completed shard jobs are publishing and consume no/);
+  assert.match(modeBlock, /\[ "\$active_shards" -lt 1 \] && \[ "\$total_shards" -lt 1 \]/);
   assert.match(modeBlock, /lane_shard_cap="\$normal_shards"/);
   assert.match(modeBlock, /lane_shard_cap="\$hot_intake_shards"/);
   assert.match(modeBlock, /Capping broad background review shards/);
@@ -641,6 +688,39 @@ test("background review capacity reserves expanding matrices and caps broad manu
   assert.match(commitBlock, /limit review_shards\.normal_default/);
   assert.match(commitBlock, /STALE_QUEUED_CUTOFF/);
   assert.match(commitBlock, /updatedAt:\.updated_at/);
+  assert.match(commitBlock, /workflowPath == "\.github\/workflows\/sweep\.yml"/);
+  assert.match(commitBlock, /WORKFLOW_PATH="\$1"/);
+  assert.doesNotMatch(commitBlock, /workflowName == "ClawSweeper"/);
+  assert.doesNotMatch(commitBlock, /WORKFLOW_NAME="\$1"/);
+});
+
+test("review backstops identify sweep runs by stable workflow path", () => {
+  const workflow = readText(".github/workflows/sweep.yml");
+  const block = workflow.slice(workflow.indexOf("- name: Queue review backstops"));
+
+  assert.match(block, /actions\/runs\?per_page=100/);
+  assert.match(block, /workflowPath:\.path/);
+  assert.match(block, /run\.workflowPath !== "\.github\/workflows\/sweep\.yml"/);
+  assert.doesNotMatch(block, /gh run list/);
+  assert.doesNotMatch(block, /run\.workflowName/);
+});
+
+test("scheduled background reviews serialize planners and refill released capacity", () => {
+  const workflow = readText(".github/workflows/sweep.yml");
+  const concurrencyBlock = workflow.slice(
+    workflow.indexOf("concurrency:"),
+    workflow.indexOf("jobs:"),
+  );
+  const planHeader = workflow.slice(
+    workflow.indexOf("\n  plan:"),
+    workflow.indexOf("\n    outputs:", workflow.indexOf("\n  plan:")),
+  );
+
+  assert.match(concurrencyBlock, /format\('clawsweeper-intake-v2-\{0\}', github\.run_id\)/);
+  assert.match(concurrencyBlock, /format\('clawsweeper-review-\{0\}', github\.run_id\)/);
+  assert.match(planHeader, /group: \$\{\{ format\('clawsweeper-planner-\{0\}'/);
+  assert.match(planHeader, /\|\| github\.run_id/);
+  assert.match(planHeader, /cancel-in-progress: false/);
 });
 
 test("scheduled normal review keeps workers warm with multi-item shards", () => {
