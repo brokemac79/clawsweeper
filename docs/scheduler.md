@@ -454,7 +454,7 @@ hold the planner concurrency group or delay the next 89-shard backfill
 wave. Exact issue/PR reviews and repository-dispatch item runs still sync their
 selected comments inline before finishing.
 
-Long apply runs commit checkpoints every 5 fresh closes and dispatch a
+Long apply runs commit checkpoints every 20 fresh closes and dispatch a
 continuation with a fresh GitHub App token after any checkpoint that closes at
 least one item. A saturated scan that closes nothing stops without chaining so
 the same records cannot create an unbounded runner loop.
@@ -462,9 +462,18 @@ the same records cannot create an unbounded runner loop.
 Before a close-mode apply run starts, the workflow summarizes the selected close
 candidate mix by quality bucket in the status detail. Buckets such as
 implemented-on-main, duplicate/superseded, needs PR close proof,
-aging/low-signal, policy-sensitive, and retry-after-guard-skip are
+aging/low-signal (including stalled-unproven and abandoned PRs),
+policy-sensitive, and retry-after-guard-skip are
 operator-facing telemetry only; they do not change candidate eligibility, close
 limits, live-state checks, or policy gates.
+
+Apply and comment-sync Actions run titles include the target repository. Before
+dispatching a default cursor-based apply continuation, the workflow checks
+recent active or queued same-target default cursor runs and treats one of those
+runs as the continuation instead of adding another pending run. Custom-input
+and explicit-item runs have a different title and cannot suppress the default
+cursor lane; their own continuations still dispatch with the exact inputs. The
+log identifies the default cursor run that covered the continuation.
 
 ## Continuation and Recovery
 

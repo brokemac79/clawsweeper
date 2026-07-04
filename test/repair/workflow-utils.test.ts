@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  applyContinuationBlocker,
   applyCursorAdvanceCount,
   artifactItemNumbers,
   automationLimit,
@@ -29,6 +30,115 @@ import {
   readWorkerConfig,
   workerLimit,
 } from "../../dist/repair/limits.js";
+
+const APPLY_RUN_PATH = ".github/workflows/sweep.yml";
+const DEFAULT_APPLY_TITLE = "Apply default ClawSweeper closures for openclaw/openclaw";
+
+test("apply continuation blocker only shares the default cursor lane", () => {
+  const blocker = applyContinuationBlocker(
+    [
+      {
+        databaseId: "current",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "in_progress",
+      },
+      {
+        databaseId: "custom",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: "Apply custom ClawSweeper closures for openclaw/openclaw",
+        status: "in_progress",
+      },
+      {
+        databaseId: "default",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "in_progress",
+      },
+    ],
+    { currentRunId: "current", targetRepo: "openclaw/openclaw" },
+  );
+
+  assert.deepEqual(blocker, { databaseId: "default", status: "in_progress" });
+});
+
+test("apply continuation blocker ignores stale queued and unrelated runs", () => {
+  const nowMs = Date.parse("2026-07-04T12:00:00Z");
+  const blocker = applyContinuationBlocker(
+    [
+      {
+        databaseId: "wrong-path",
+        workflowPath: ".github/workflows/other.yml",
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "in_progress",
+      },
+      {
+        databaseId: "completed",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "completed",
+      },
+      {
+        databaseId: "stale",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "queued",
+        updatedAt: "2026-07-04T05:59:59Z",
+      },
+      {
+        databaseId: "fresh",
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "queued",
+        updatedAt: "2026-07-04T06:00:01Z",
+      },
+    ],
+    { currentRunId: "current", targetRepo: "openclaw/openclaw", nowMs },
+  );
+
+  assert.deepEqual(blocker, { databaseId: "fresh", status: "queued" });
+});
+
+test("apply continuation blocker CLI emits workflow fields", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-apply-blocker-"));
+  const runsPath = path.join(root, "runs.json");
+  write(
+    runsPath,
+    JSON.stringify([
+      {
+        databaseId: 42,
+        workflowPath: APPLY_RUN_PATH,
+        displayTitle: DEFAULT_APPLY_TITLE,
+        status: "waiting",
+      },
+    ]),
+  );
+
+  const output = execFileSync(
+    process.execPath,
+    [
+      path.resolve("dist/repair/workflow-utils.js"),
+      "apply-continuation-blocker",
+      "--runs",
+      runsPath,
+      "--current-run-id",
+      "99",
+      "--target-repo",
+      "openclaw/openclaw",
+    ],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(
+    output,
+    [
+      "APPLY_CONTINUATION_BLOCKED=true",
+      "APPLY_CONTINUATION_BLOCKER_RUN_ID=42",
+      "APPLY_CONTINUATION_BLOCKER_STATUS=waiting",
+      "",
+    ].join("\n"),
+  );
+});
 
 test("workflow utilities expose automation limits", () => {
   assert.equal(
@@ -1092,6 +1202,8 @@ test("workflow utilities summarize proposed close candidate quality buckets", ()
     "implemented_on_main",
     oldDate,
   );
+  writeProposedRecord(root, 11, "pull_request", "proposed_close", "stalled_unproven_pr", oldDate);
+  writeProposedRecord(root, 12, "pull_request", "proposed_close", "abandoned_pr", oldDate);
 
   const summary = withCwd(root, () =>
     proposedItemQualitySummary({
@@ -1104,10 +1216,10 @@ test("workflow utilities summarize proposed close candidate quality buckets", ()
     }),
   );
 
-  assert.equal(summary.total, 6);
+  assert.equal(summary.total, 8);
   assert.equal(
     summary.summary,
-    "1 implemented-on-main, 1 duplicate/superseded, 1 needs PR close proof, 1 aging/low-signal, 1 policy-sensitive, 1 retry after guard skip",
+    "1 implemented-on-main, 1 duplicate/superseded, 1 needs PR close proof, 3 aging/low-signal, 1 policy-sensitive, 1 retry after guard skip",
   );
   assert.deepEqual(
     summary.buckets.map((bucket) => [bucket.bucket, bucket.count]),
@@ -1115,7 +1227,7 @@ test("workflow utilities summarize proposed close candidate quality buckets", ()
       ["ready_implemented", 1],
       ["duplicate_or_superseded", 1],
       ["needs_pr_close_coverage", 1],
-      ["aging_or_low_signal", 1],
+      ["aging_or_low_signal", 3],
       ["policy_sensitive", 1],
       ["retry_after_guard_skip", 1],
     ],

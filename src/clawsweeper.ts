@@ -51,6 +51,20 @@ import {
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
 import {
+  appendFloorBackfillCandidates,
+  compareDueCandidates,
+  compareHotIntakeDueCandidates,
+  hasReviewPolicyMismatch,
+  nextReviewDueAtMs,
+  reviewedAtMs,
+  reviewPriority,
+  schedulerBucket,
+  selectDueCandidates,
+  shouldReviewItem,
+  shouldStopSaturatedPlanScan,
+  type SchedulerDueCandidate,
+} from "./scheduler-policy.js";
+import {
   isUserFacingCommandError,
   resolveCommand,
   runText,
@@ -84,6 +98,15 @@ import {
   type Args,
 } from "./clawsweeper-args.js";
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
+import {
+  appendReviewHistoryCycle,
+  neutralizeReviewControlMarkers,
+  parseReviewHistory,
+  renderReviewHistorySection,
+  reviewHistoryCycleFromCommentBody,
+  type ReviewHistoryCycle,
+  type ReviewHistoryLedger,
+} from "./review-history.js";
 
 export {
   codexEnv,
@@ -102,7 +125,6 @@ export {
   isLockedConversationCommentError,
   shouldRetryGh,
 } from "./github-retry.js";
-
 type ItemKind = "issue" | "pull_request";
 type ApplyKind = ItemKind | "all";
 type DecisionKind = "close" | "keep_open";
@@ -131,6 +153,8 @@ type ImpactLabelName =
   | "impact:message-loss"
   | "impact:session-state"
   | "impact:auth-provider"
+  | "impact:ux-release-blocker"
+  | "impact:ux-friction"
   | "impact:other";
 type MergeRiskLabelName =
   | "merge-risk: 🚨 compatibility"
@@ -231,6 +255,8 @@ type CloseReason =
   | "clawhub"
   | "duplicate_or_superseded"
   | "low_signal_unmergeable_pr"
+  | "stalled_unproven_pr"
+  | "abandoned_pr"
   | "unconfirmed_product_direction"
   | "not_actionable_in_repo"
   | "incoherent"
@@ -353,6 +379,7 @@ interface ReviewFinding {
   file: string;
   lineStart: number;
   lineEnd: number;
+  lateFinding?: boolean;
 }
 
 interface SecurityConcern {
@@ -456,6 +483,7 @@ interface ReviewCommentRenderOptions {
   prStatusKind?: PrStatusLabelKind | null;
   previousLabels?: readonly string[];
   hasOpenLinkedPullRequest?: boolean;
+  previousReviewCommentBody?: string;
 }
 
 interface Decision {
@@ -804,22 +832,7 @@ const DEFAULT_PLAN_BATCH_SIZE = 3;
 const DEFAULT_PLAN_SHARD_COUNT = AUTOMATION_LIMITS.review_shards.normal_default;
 const MAX_PLAN_SHARD_COUNT = AUTOMATION_LIMITS.review_shards.hard_cap;
 
-type SchedulerBucket =
-  | "hot_issue"
-  | "hot_pull_request"
-  | "activity"
-  | "daily_pull_request"
-  | "recent_issue"
-  | "weekly_issue";
-
-interface DueCandidate {
-  item: Item;
-  review: ExistingReview | null;
-  priority: number;
-  reviewedAt: number;
-  nextDueAt: number;
-  bucket: SchedulerBucket;
-}
+type DueCandidate = SchedulerDueCandidate<Item, ExistingReview>;
 
 interface ApplyResult {
   repo?: string;
@@ -1082,13 +1095,16 @@ let activeRepositoryProfile = repositoryProfileFor(
 const FRESH_DAYS = 7;
 const HOT_REVIEW_DAYS = 7;
 const RECENT_ISSUE_DAYS = 30;
-const HOURLY_REVIEW_MS = 60 * 60 * 1000;
 const DEFAULT_BACKFILL_REVIEW_AGE_MINUTES = 360;
 const DAILY_REVIEW_DAYS = 1;
 const WEEKLY_REVIEW_DAYS = 7;
 const STALE_INSUFFICIENT_INFO_MIN_AGE_DAYS = 60;
 const UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS = 14;
 const UNCONFIRMED_PRODUCT_DIRECTION_MIN_INACTIVE_DAYS = 7;
+const STALLED_UNPROVEN_PR_MIN_AGE_DAYS = 14;
+const STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS = 14;
+const ABANDONED_PR_MIN_AGE_DAYS = 30;
+const ABANDONED_PR_MIN_INACTIVE_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_MISSING_OPEN_MS = DAY_MS;
 const DEFAULT_CODEX_MODEL = PUBLIC_CODEX_MODEL;
@@ -1096,7 +1112,7 @@ const DEFAULT_REASONING_EFFORT = "high";
 const DEFAULT_SERVICE_TIER = "";
 const DEFAULT_REVIEW_CODEX_TIMEOUT_MS = 1_200_000;
 const DEFAULT_CODEX_FALLBACK_MIN_BUDGET_MS = 120_000;
-const REVIEW_POLICY_VERSION = "2026-06-15-policy-v22";
+const REVIEW_POLICY_VERSION = "2026-07-04-policy-v23";
 const REVIEW_ITEM_PROMPT_PATH = join(ROOT, "prompts", "review-item.md");
 const CLAWSWEEPER_DECISION_SCHEMA_PATH = join(ROOT, "schema", "clawsweeper-decision.schema.json");
 const MATURITY_STABLE_SHORTLIST_SCRIPT_PATH = join(
@@ -1116,12 +1132,13 @@ const AUTOMERGE_LABEL = "clawsweeper:automerge";
 const AUTOFIX_LABEL = "clawsweeper:autofix";
 const HUMAN_REVIEW_LABEL = "clawsweeper:human-review";
 const MANUAL_ONLY_LABEL = "clawsweeper:manual-only";
-const UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS = new Set([
+const PR_AUTO_CLOSE_EXEMPT_LABELS = new Set([
   HUMAN_REVIEW_LABEL,
   MANUAL_ONLY_LABEL,
   AUTOMERGE_LABEL,
   AUTOFIX_LABEL,
 ]);
+const WAITING_ON_AUTHOR_LABEL = "status: ⏳ waiting on author";
 const PROOF_OVERRIDE_LABEL = "proof: override";
 const PROOF_SUFFICIENT_LABEL = "proof: sufficient";
 const PROOF_NUDGE_MARKER_PREFIX = "<!-- clawsweeper-proof-nudge";
@@ -1330,6 +1347,17 @@ const IMPACT_LABELS = [
       "This issue is about auth, provider routing, model choice, or SecretRef resolution.",
   },
   {
+    name: "impact:ux-release-blocker",
+    color: "B60205",
+    description: "A non-technical user is blocked without terminal, logs, config, or support.",
+  },
+  {
+    name: "impact:ux-friction",
+    color: "FBCA04",
+    description:
+      "User-facing flow adds avoidable confusion or support burden without fully blocking progress.",
+  },
+  {
     name: "impact:other",
     color: "C5DEF5",
     description: "This issue has meaningful maintainer-visible impact outside the owned taxonomy.",
@@ -1530,6 +1558,8 @@ const ALLOWED_REASONS = new Set<CloseReason>([
   "clawhub",
   "duplicate_or_superseded",
   "low_signal_unmergeable_pr",
+  "stalled_unproven_pr",
+  "abandoned_pr",
   "unconfirmed_product_direction",
   "not_actionable_in_repo",
   "incoherent",
@@ -1803,6 +1833,7 @@ const REVIEW_FINDING_SCHEMA_KEYS = new Set([
   "file",
   "lineStart",
   "lineEnd",
+  "lateFinding",
 ]);
 const LIKELY_OWNER_SCHEMA_KEYS = new Set([
   "person",
@@ -2550,7 +2581,7 @@ function parseReviewFinding(value: unknown, path: string): ReviewFinding {
   const lineEnd = requireInteger(record.lineEnd, `${path}.lineEnd`);
   if (lineStart <= 0) throw new Error(`${path}.lineStart must be positive`);
   if (lineEnd < lineStart) throw new Error(`${path}.lineEnd must be >= lineStart`);
-  return {
+  const finding: ReviewFinding = {
     title: requireString(record.title, `${path}.title`),
     body: requireString(record.body, `${path}.body`),
     priority: requirePriority(record.priority, `${path}.priority`),
@@ -2559,6 +2590,10 @@ function parseReviewFinding(value: unknown, path: string): ReviewFinding {
     lineStart,
     lineEnd,
   };
+  if (record.lateFinding !== undefined) {
+    finding.lateFinding = requireBoolean(record.lateFinding, `${path}.lateFinding`);
+  }
+  return finding;
 }
 
 type DecisionNormalizationItem = Pick<Item, "repo" | "number" | "kind" | "authorAssociation">;
@@ -3263,7 +3298,7 @@ function unconfirmedProductDirectionApplyBlockReason(
   if (ageBlock) return ageBlock;
   const exemptLabel = item.labels
     .map(normalizeLabelName)
-    .find((label) => UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS.has(label));
+    .find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
   if (exemptLabel) return `${exemptLabel} exempts this PR from product-direction auto-close`;
 
   const issue = ghJson<{ assignees?: unknown[] }>([
@@ -3313,6 +3348,251 @@ function unconfirmedProductDirectionApplyBlockReasonSafe(
     return unconfirmedProductDirectionApplyBlockReason(number, item, reviewedUpdatedAt, reviewedAt);
   } catch (error) {
     return `product-direction calibration check failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+function pullRequestHumanEngagementBlockReason(number: number): string | null {
+  const issue = ghJson<{ assignees?: unknown[] }>([
+    "api",
+    `repos/${targetRepo()}/issues/${number}`,
+    "--jq",
+    "{assignees:[.assignees[]? | {login:.login}]}",
+  ]);
+  if ((issue.assignees ?? []).length > 0) return "assigned PR has active human signal";
+
+  const pull = ghJson<{ requested_reviewers?: unknown[]; requested_teams?: unknown[] }>([
+    "api",
+    `repos/${targetRepo()}/pulls/${number}`,
+    "--jq",
+    "{requested_reviewers:[.requested_reviewers[]? | {login:.login}],requested_teams:[.requested_teams[]? | {slug:.slug}]}",
+  ]);
+  if ((pull.requested_reviewers ?? []).length > 0 || (pull.requested_teams ?? []).length > 0) {
+    return "requested reviewers or teams indicate active review signal";
+  }
+
+  const maintainerComments = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/comments`),
+  );
+  if (maintainerComments.length > 0) return "maintainer issue comment blocks inactivity auto-close";
+
+  const maintainerReviews = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/reviews`),
+  );
+  if (maintainerReviews.length > 0) return "maintainer PR review blocks inactivity auto-close";
+
+  const maintainerInlineComments = maintainerAssociatedEntries(
+    ghPaged<unknown>(`repos/${targetRepo()}/pulls/${number}/comments`),
+  );
+  if (maintainerInlineComments.length > 0) {
+    return "maintainer inline review comment blocks inactivity auto-close";
+  }
+  return null;
+}
+
+interface PullRequestLiveActivity {
+  draft: boolean;
+  headSha: string;
+  headActivityAtMs: number | null;
+  headChecksFailing: boolean;
+}
+
+const FAILING_CHECK_RUN_CONCLUSIONS = new Set(["failure", "timed_out"]);
+
+// Committer dates alone under-report activity: a contributor can push an old
+// commit, so the inactivity clock also observes status/check-run timestamps,
+// which CI refreshes on every push. Missing data keeps the PR open.
+function pullRequestLiveActivity(number: number): PullRequestLiveActivity {
+  const pull = ghJson<{ draft?: boolean; head?: { sha?: string } }>([
+    "api",
+    `repos/${targetRepo()}/pulls/${number}`,
+  ]);
+  const headSha = typeof pull.head?.sha === "string" ? pull.head.sha : "";
+  let headActivityAtMs: number | null = null;
+  let headChecksFailing = false;
+  const observe = (value: unknown): void => {
+    const ms = Date.parse(typeof value === "string" ? value : "");
+    if (Number.isFinite(ms) && (headActivityAtMs === null || ms > headActivityAtMs)) {
+      headActivityAtMs = ms;
+    }
+  };
+  if (headSha) {
+    const commit = ghJson<{ commit?: { committer?: { date?: string } } }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}`,
+    ]);
+    observe(commit.commit?.committer?.date);
+    const combined = ghJson<{ state?: string; statuses?: unknown[] }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}/status`,
+    ]);
+    if (combined.state === "failure" || combined.state === "error") headChecksFailing = true;
+    for (const status of combined.statuses ?? []) {
+      const record = asRecord(status);
+      observe(record.updated_at);
+      observe(record.created_at);
+    }
+    const checks = ghJson<{ check_runs?: unknown[] }>([
+      "api",
+      `repos/${targetRepo()}/commits/${headSha}/check-runs?per_page=100`,
+    ]);
+    for (const run of checks.check_runs ?? []) {
+      const record = asRecord(run);
+      if (
+        typeof record.conclusion === "string" &&
+        FAILING_CHECK_RUN_CONCLUSIONS.has(record.conclusion)
+      ) {
+        headChecksFailing = true;
+      }
+      observe(record.started_at);
+      observe(record.completed_at);
+    }
+  }
+  return { draft: pull.draft === true, headSha, headActivityAtMs, headChecksFailing };
+}
+
+function prAutoCloseExemptLabel(labels: readonly string[]): string | undefined {
+  return labels.map(normalizeLabelName).find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
+}
+
+export function stalledUnprovenPrAgeSkipReason(
+  item: Pick<Item, "createdAt">,
+  now = Date.now(),
+): string | null {
+  if (!isOlderThanDays(item.createdAt, STALLED_UNPROVEN_PR_MIN_AGE_DAYS, now)) {
+    return `stalled_unproven_pr requires PR older than ${STALLED_UNPROVEN_PR_MIN_AGE_DAYS} days`;
+  }
+  return null;
+}
+
+const STALLED_PROOF_REQUEST_LABELS = new Set([
+  "triage: needs-real-behavior-proof",
+  "status: 📣 needs proof",
+]);
+
+// The durable review comment is edited in place, so its created_at cannot
+// date the proof ask. Only immutable signals count: needs-proof label
+// timeline events and proof-nudge comment creation times.
+export function stalledUnprovenProofRequestBlockReason(
+  number: number,
+  now = Date.now(),
+): string | null {
+  let earliestRequestAtMs: number | null = null;
+  const observe = (value: unknown): void => {
+    const ms = Date.parse(typeof value === "string" ? value : "");
+    if (Number.isFinite(ms) && (earliestRequestAtMs === null || ms < earliestRequestAtMs)) {
+      earliestRequestAtMs = ms;
+    }
+  };
+  for (const event of ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/timeline`)) {
+    const record = asRecord(event);
+    if (record.event !== "labeled") continue;
+    const labelName = asRecord(record.label).name;
+    if (typeof labelName !== "string") continue;
+    if (!STALLED_PROOF_REQUEST_LABELS.has(normalizeLabelName(labelName))) continue;
+    observe(record.created_at);
+  }
+  for (const comment of ghPaged<unknown>(`repos/${targetRepo()}/issues/${number}/comments`)) {
+    const record = asRecord(comment);
+    const body = typeof record.body === "string" ? record.body : "";
+    if (!body.includes(PROOF_NUDGE_MARKER_PREFIX)) continue;
+    observe(record.created_at);
+  }
+  if (earliestRequestAtMs === null) {
+    return "no visible dated proof request (needs-proof label event or proof nudge) on the live PR";
+  }
+  if (now - earliestRequestAtMs <= STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS * DAY_MS) {
+    return `stalled_unproven_pr requires the proof request to be visible for ${STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS} days`;
+  }
+  return null;
+}
+
+export function abandonedPrAgeSkipReason(
+  item: Pick<Item, "createdAt">,
+  now = Date.now(),
+): string | null {
+  if (!isOlderThanDays(item.createdAt, ABANDONED_PR_MIN_AGE_DAYS, now)) {
+    return `abandoned_pr requires PR older than ${ABANDONED_PR_MIN_AGE_DAYS} days`;
+  }
+  return null;
+}
+
+function stalledUnprovenPrApplyBlockReason(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  const ageBlock = stalledUnprovenPrAgeSkipReason(item);
+  if (ageBlock) return ageBlock;
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from stalled-unproven auto-close`;
+  const proofLabel = item.labels
+    .map(normalizeLabelName)
+    .find(
+      (label) =>
+        label === normalizeLabelName(PROOF_SUFFICIENT_LABEL) ||
+        label === normalizeLabelName(PROOF_OVERRIDE_LABEL),
+    );
+  if (proofLabel) return `${proofLabel} marks the requested proof as resolved`;
+  const proofRequestBlock = stalledUnprovenProofRequestBlockReason(number);
+  if (proofRequestBlock) return proofRequestBlock;
+  const activity = pullRequestLiveActivity(number);
+  if (activity.draft) return "draft PR is handled by the abandoned-PR policy, not stalled-unproven";
+  if (
+    activity.headActivityAtMs === null ||
+    Date.now() - activity.headActivityAtMs <= STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS * DAY_MS
+  ) {
+    return `stalled_unproven_pr requires ${STALLED_UNPROVEN_PR_MIN_INACTIVE_DAYS} days without new head commit or check activity`;
+  }
+  return pullRequestHumanEngagementBlockReason(number);
+}
+
+function stalledUnprovenPrApplyBlockReasonSafe(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  try {
+    return stalledUnprovenPrApplyBlockReason(number, item);
+  } catch (error) {
+    return `stalled-unproven liveness check failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+function abandonedPrApplyBlockReason(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  const ageBlock = abandonedPrAgeSkipReason(item);
+  if (ageBlock) return ageBlock;
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from abandoned-PR auto-close`;
+  const activity = pullRequestLiveActivity(number);
+  if (
+    activity.headActivityAtMs === null ||
+    Date.now() - activity.headActivityAtMs <= ABANDONED_PR_MIN_INACTIVE_DAYS * DAY_MS
+  ) {
+    return `abandoned_pr requires ${ABANDONED_PR_MIN_INACTIVE_DAYS} days without new head commit or check activity`;
+  }
+  const waitingOnAuthor = item.labels
+    .map(normalizeLabelName)
+    .includes(normalizeLabelName(WAITING_ON_AUTHOR_LABEL));
+  const stalledState = activity.draft || waitingOnAuthor || activity.headChecksFailing;
+  if (!stalledState) {
+    return "live PR is not draft, waiting-on-author, or failing checks; abandonment is not confirmed";
+  }
+  return pullRequestHumanEngagementBlockReason(number);
+}
+
+function abandonedPrApplyBlockReasonSafe(
+  number: number,
+  item: Pick<Item, "createdAt" | "labels">,
+): string | null {
+  try {
+    return abandonedPrApplyBlockReason(number, item);
+  } catch (error) {
+    return `abandoned-PR liveness check failed: ${
       error instanceof Error ? error.message : String(error)
     }`;
   }
@@ -3409,6 +3689,8 @@ interface PreviousClawSweeperReview {
   rating: string;
   nextStep: string;
   findings: Array<{ priority: string; title: string }>;
+  earlierReviewCycles: ReviewHistoryCycle[];
+  completedReviewCycles: number;
   commentId: unknown;
   commentUrl: unknown;
   commentUpdatedAt: unknown;
@@ -3602,21 +3884,14 @@ function previousReviewProofStatus(body: string): string {
   return firstMergeReadinessLine(body, "Proof:");
 }
 
-function previousReviewFindings(body: string): Array<{ priority: string; title: string }> {
-  return body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .flatMap((line) => {
-      if (!line.startsWith("- [P")) return [];
-      const close = line.indexOf("]");
-      if (close < 5) return [];
-      const priority = line.slice(3, close);
-      if (!/^P[0-3]$/.test(priority)) return [];
-      const rest = line.slice(close + 1).trim();
-      const dash = minNonNegative([rest.indexOf(" - "), rest.indexOf(" — ")]);
-      const title = (dash < 0 ? rest : rest.slice(0, dash)).trim();
-      return title ? [{ priority, title }] : [];
-    });
+function reviewHistoryFindings(
+  cycle: ReviewHistoryCycle | undefined,
+): Array<{ priority: string; title: string }> {
+  if (!cycle) return [];
+  return cycle.findings.flatMap((finding) => {
+    const match = finding.match(/^\[(P[0-3])\]\s+(.+)$/);
+    return match?.[1] && match[2] ? [{ priority: match[1], title: match[2] }] : [];
+  });
 }
 
 function extractLatestClawSweeperReview(
@@ -3631,11 +3906,18 @@ function extractLatestClawSweeperReview(
   const body = rawCommentBody(latest);
   const verdictMarker = htmlMarkerWithPrefix(body, "clawsweeper-verdict:");
   const actionMarker = htmlMarkerWithPrefix(body, "clawsweeper-action:");
-  const reviewedSha = markerAttribute(verdictMarker, "sha") ?? markerAttribute(actionMarker, "sha");
+  const history = parseReviewHistory(body);
+  const currentCycle = reviewHistoryCycleFromCommentBody(body);
+  const latestCompletedCycle = currentCycle ?? history.cycles.at(-1);
+  const earlierReviewCycles = currentCycle ? history.cycles : history.cycles.slice(0, -1);
   return {
     status: previousReviewStatus(body),
-    reviewedAt: previousReviewReviewedAt(body),
-    reviewedSha,
+    reviewedAt: previousReviewReviewedAt(body) ?? latestCompletedCycle?.reviewedAt ?? null,
+    reviewedSha:
+      markerAttribute(verdictMarker, "sha") ??
+      markerAttribute(actionMarker, "sha") ??
+      latestCompletedCycle?.sha ??
+      null,
     verdictMarker,
     actionMarker,
     summary: firstNonEmptyLine(markdownSection(body, "Summary")),
@@ -3644,7 +3926,9 @@ function extractLatestClawSweeperReview(
     nextStep:
       firstNonEmptyLine(markdownSection(body, "Next step before merge")) ||
       firstNonEmptyLine(markdownSection(body, "Next step")),
-    findings: previousReviewFindings(body),
+    findings: reviewHistoryFindings(latestCompletedCycle),
+    earlierReviewCycles,
+    completedReviewCycles: history.totalCompletedCycles + (currentCycle ? 1 : 0),
     commentId: comment.id,
     commentUrl: comment.html_url,
     commentUpdatedAt: comment.updated_at,
@@ -5276,126 +5560,6 @@ function isCurrentForCadence(options: {
   return options.now - reviewedAt < options.cadenceMs;
 }
 
-function reviewedAtMs(review: ExistingReview | null): number | null {
-  if (review?.reviewStatus !== "complete") return null;
-  if (!review.reviewedAt) return null;
-  const reviewedAt = Date.parse(review.reviewedAt);
-  return Number.isFinite(reviewedAt) ? reviewedAt : null;
-}
-
-function hasActivitySinceReview(item: Item, review: ExistingReview | null): boolean {
-  if (!review) return false;
-  const updatedAt = Date.parse(item.updatedAt);
-  const reviewedAt = reviewedAtMs(review);
-  const reviewCommentSyncedAt = timestampMs(review.reviewCommentSyncedAt);
-  const labelsSyncedAt = timestampMs(review.labelsSyncedAt);
-  const botOwnedSyncedAt = Math.max(
-    reviewCommentSyncedAt ?? -Infinity,
-    labelsSyncedAt ?? -Infinity,
-  );
-  if (review.itemUpdatedAt) {
-    if (item.updatedAt === review.itemUpdatedAt) return false;
-    if (Number.isFinite(updatedAt) && reviewedAt !== null && updatedAt <= reviewedAt) return false;
-    if (
-      Number.isFinite(updatedAt) &&
-      Number.isFinite(botOwnedSyncedAt) &&
-      updatedAt <= botOwnedSyncedAt
-    ) {
-      return false;
-    }
-    return true;
-  }
-  if (
-    Number.isFinite(updatedAt) &&
-    Number.isFinite(botOwnedSyncedAt) &&
-    updatedAt <= botOwnedSyncedAt
-  ) {
-    return false;
-  }
-  return reviewedAt !== null && Number.isFinite(updatedAt) && updatedAt > reviewedAt;
-}
-
-function isCreatedWithinDays(
-  item: Pick<Item, "createdAt">,
-  days: number,
-  now = Date.now(),
-): boolean {
-  const createdAt = Date.parse(item.createdAt);
-  return Number.isFinite(createdAt) && now - createdAt < days * DAY_MS;
-}
-
-function reviewCadenceMs(item: Item, review: ExistingReview | null, now = Date.now()): number {
-  if (hasActivitySinceReview(item, review)) return HOURLY_REVIEW_MS;
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) return DAILY_REVIEW_DAYS * DAY_MS;
-  if (item.kind === "pull_request") return DAILY_REVIEW_DAYS * DAY_MS;
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) {
-    return DAILY_REVIEW_DAYS * DAY_MS;
-  }
-  return WEEKLY_REVIEW_DAYS * DAY_MS;
-}
-
-function hasReviewPolicyMismatch(review: ExistingReview | null, reviewPolicy?: string): boolean {
-  return Boolean(review && reviewPolicy && review.reviewPolicy !== reviewPolicy);
-}
-
-export function shouldReviewItem(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): boolean {
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return true;
-  const reviewedAt = reviewedAtMs(review);
-  if (reviewedAt === null) return true;
-  return now - reviewedAt >= reviewCadenceMs(item, review, now);
-}
-
-export function reviewPriority(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): number {
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now) && item.kind === "issue") return 0;
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) return 1;
-  if (hasActivitySinceReview(item, review)) return 2;
-  if (item.kind === "pull_request") return 3;
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) return 4;
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return 5;
-  return 6;
-}
-
-function schedulerBucket(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-): SchedulerBucket {
-  if (isCreatedWithinDays(item, HOT_REVIEW_DAYS, now)) {
-    return item.kind === "issue" ? "hot_issue" : "hot_pull_request";
-  }
-  if (hasActivitySinceReview(item, review)) return "activity";
-  if (item.kind === "pull_request") return "daily_pull_request";
-  const createdAt = Date.parse(item.createdAt);
-  if (Number.isFinite(createdAt) && now - createdAt < RECENT_ISSUE_DAYS * DAY_MS) {
-    return "recent_issue";
-  }
-  return "weekly_issue";
-}
-
-function nextReviewDueAtMs(
-  item: Item,
-  review: ExistingReview | null,
-  now = Date.now(),
-  reviewPolicy?: string,
-): number {
-  if (hasReviewPolicyMismatch(review, reviewPolicy)) return 0;
-  const reviewedAt = reviewedAtMs(review);
-  if (reviewedAt === null) return 0;
-  return reviewedAt + reviewCadenceMs(item, review, now);
-}
-
 function dueCandidate(
   item: Item,
   itemsDir: string,
@@ -5437,196 +5601,6 @@ function reviewBackfillCandidate(
     nextDueAt: nextReviewDueAtMs(item, review, now, reviewPolicy),
     bucket: schedulerBucket(item, review, now),
   };
-}
-
-function compareDueCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.priority - right.priority ||
-    left.nextDueAt - right.nextDueAt ||
-    left.reviewedAt - right.reviewedAt ||
-    left.item.number - right.item.number
-  );
-}
-
-function compareBackfillCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.nextDueAt - right.nextDueAt ||
-    left.reviewedAt - right.reviewedAt ||
-    left.priority - right.priority ||
-    left.item.number - right.item.number
-  );
-}
-
-function weeklyReviewDeadlineMs(candidate: DueCandidate): number {
-  if (candidate.reviewedAt > 0) {
-    return candidate.reviewedAt + WEEKLY_REVIEW_DAYS * DAY_MS;
-  }
-  const createdAt = Date.parse(candidate.item.createdAt);
-  return Number.isFinite(createdAt) ? createdAt + WEEKLY_REVIEW_DAYS * DAY_MS : 0;
-}
-
-const SCHEDULER_BUCKET_WEIGHTS: ReadonlyArray<readonly [SchedulerBucket, number]> = [
-  ["hot_issue", 4],
-  ["hot_pull_request", 2],
-  ["activity", 2],
-  ["daily_pull_request", 3],
-  ["recent_issue", 2],
-  ["weekly_issue", 1],
-];
-
-function selectDueCandidates(
-  due: DueCandidate[],
-  limit: number,
-  compare: (left: DueCandidate, right: DueCandidate) => number = compareDueCandidates,
-  now = Date.now(),
-): DueCandidate[] {
-  const capacity = Math.max(0, limit);
-  if (capacity === 0) return [];
-  const buckets = new Map<SchedulerBucket, DueCandidate[]>();
-  for (const [bucket] of SCHEDULER_BUCKET_WEIGHTS) buckets.set(bucket, []);
-  for (const candidate of due) buckets.get(candidate.bucket)?.push(candidate);
-  for (const candidates of buckets.values()) candidates.sort(compare);
-
-  const selected: DueCandidate[] = [];
-  const selectedKeys = new Set<string>();
-  const take = (candidate: DueCandidate | undefined): void => {
-    if (!candidate || selected.length >= capacity) return;
-    const key = existingReviewKey(candidate.item.repo, candidate.item.number);
-    if (selectedKeys.has(key)) return;
-    selectedKeys.add(key);
-    selected.push(candidate);
-  };
-
-  // Weekly freshness is the outer SLO. Catch up breached items before applying
-  // the normal weighted mix for hourly and daily work.
-  const weeklyOverdue = due
-    .filter((candidate) => weeklyReviewDeadlineMs(candidate) <= now)
-    .sort(
-      (left, right) =>
-        weeklyReviewDeadlineMs(left) - weeklyReviewDeadlineMs(right) || compare(left, right),
-    );
-  for (const candidate of weeklyOverdue) take(candidate);
-  for (const [bucket, candidates] of buckets) {
-    buckets.set(
-      bucket,
-      candidates.filter(
-        (candidate) =>
-          !selectedKeys.has(existingReviewKey(candidate.item.repo, candidate.item.number)),
-      ),
-    );
-  }
-
-  while (selected.length < capacity) {
-    const before = selected.length;
-    for (const [bucket, weight] of SCHEDULER_BUCKET_WEIGHTS) {
-      const candidates = buckets.get(bucket);
-      if (!candidates?.length) continue;
-      for (let i = 0; i < weight && candidates.length && selected.length < capacity; i += 1) {
-        take(candidates.shift());
-      }
-    }
-    if (selected.length === before) break;
-  }
-
-  return selected;
-}
-
-function appendFloorBackfillCandidates(
-  selected: DueCandidate[],
-  backfill: DueCandidate[],
-  options: { activeFloor: number; capacity: number },
-): DueCandidate[] {
-  const activeFloor = Math.max(0, Math.floor(options.activeFloor));
-  const capacity = Math.max(0, Math.floor(options.capacity));
-  const target = Math.min(activeFloor, capacity);
-  if (selected.length >= target) return selected;
-  const selectedKeys = new Set(
-    selected.map((candidate) => existingReviewKey(candidate.item.repo, candidate.item.number)),
-  );
-  const filled = [...selected];
-  for (const candidate of [...backfill].sort(compareBackfillCandidates)) {
-    if (filled.length >= target) break;
-    const key = existingReviewKey(candidate.item.repo, candidate.item.number);
-    if (selectedKeys.has(key)) continue;
-    selectedKeys.add(key);
-    filled.push(candidate);
-  }
-  return filled;
-}
-
-export function selectDueCandidateNumbersForTest(
-  due: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  limit: number,
-  now = Date.now(),
-): number[] {
-  return selectDueCandidates(
-    due.map((candidate) => ({
-      item: candidate.item,
-      review: null,
-      priority: candidate.priority ?? reviewPriority(candidate.item, null),
-      reviewedAt: candidate.reviewedAt ?? 0,
-      nextDueAt: candidate.nextDueAt ?? 0,
-      bucket: candidate.bucket,
-    })),
-    limit,
-    compareDueCandidates,
-    now,
-  ).map((candidate) => candidate.item.number);
-}
-
-export function appendFloorBackfillCandidateNumbersForTest(
-  selected: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  backfill: Array<{
-    item: Item;
-    bucket: SchedulerBucket;
-    priority?: number;
-    reviewedAt?: number;
-    nextDueAt?: number;
-  }>,
-  activeFloor: number,
-  capacity: number,
-): number[] {
-  const normalize = (candidate: (typeof selected)[number]): DueCandidate => ({
-    item: candidate.item,
-    review: null,
-    priority: candidate.priority ?? reviewPriority(candidate.item, null),
-    reviewedAt: candidate.reviewedAt ?? 0,
-    nextDueAt: candidate.nextDueAt ?? 0,
-    bucket: candidate.bucket,
-  });
-  return appendFloorBackfillCandidates(selected.map(normalize), backfill.map(normalize), {
-    activeFloor,
-    capacity,
-  }).map((candidate) => candidate.item.number);
-}
-
-function compareHotIntakeDueCandidates(left: DueCandidate, right: DueCandidate): number {
-  return (
-    left.priority - right.priority ||
-    hotIntakeRecencyMs(right.item) - hotIntakeRecencyMs(left.item) ||
-    right.item.number - left.item.number
-  );
-}
-
-export function hotIntakeRecencyMs(item: Pick<Item, "createdAt" | "updatedAt">): number {
-  const updatedAt = Date.parse(item.updatedAt);
-  const createdAt = Date.parse(item.createdAt);
-  return Math.max(
-    Number.isFinite(updatedAt) ? updatedAt : 0,
-    Number.isFinite(createdAt) ? createdAt : 0,
-  );
 }
 
 function fetchOpenItemPage(
@@ -6121,13 +6095,6 @@ function oldestUnreviewedAt(candidates: readonly DueCandidate[]): string | undef
     oldest = candidate.item.createdAt;
   }
   return oldest;
-}
-
-export function shouldStopSaturatedPlanScan(options: {
-  dueCount: number;
-  capacity: number;
-}): boolean {
-  return options.capacity > 0 && options.dueCount >= options.capacity;
 }
 
 function planCapacityReason(options: {
@@ -8037,6 +8004,10 @@ function closeReasonText(reason: CloseReason): string {
       return "duplicate or superseded";
     case "low_signal_unmergeable_pr":
       return "low-signal unmergeable PR";
+    case "stalled_unproven_pr":
+      return "stalled PR without requested real-behavior proof";
+    case "abandoned_pr":
+      return "abandoned inactive PR";
     case "unconfirmed_product_direction":
       return "feature-like PR without confirmed product direction";
     case "not_actionable_in_repo":
@@ -8856,6 +8827,9 @@ function reviewFindingDetailedLine(finding: ReviewFinding): string {
     reviewFindingSummaryLine(finding),
     `  ${sentence(finding.body)}`,
     `  Confidence: ${confidenceText(finding.confidenceScore)}`,
+    ...(finding.lateFinding
+      ? ["  Late finding: first raised on code an earlier review cycle already covered."]
+      : []),
   ].join("\n");
 }
 
@@ -9074,6 +9048,10 @@ function closeIntro(reason: CloseReason): string {
       return "Thanks for the context here. I swept through the related work, and this is now duplicate or superseded.";
     case "low_signal_unmergeable_pr":
       return "Thanks for the contribution. I reviewed the branch, and this PR is not a good landing base for OpenClaw.";
+    case "stalled_unproven_pr":
+      return "Thanks for the contribution. This PR still needs the requested real-behavior proof, and the branch has been idle since that ask.";
+    case "abandoned_pr":
+      return "Thanks for the contribution. This PR has been inactive for a while and still is not in a landable state.";
     case "unconfirmed_product_direction":
       return "Thanks for the contribution. ClawSweeper proposes closing this for now: the implementation may be reasonable, but passing review and proof does not establish that OpenClaw should add this product surface.";
     case "not_actionable_in_repo":
@@ -9101,6 +9079,10 @@ function closeOutro(reason: CloseReason, canonicalLinks: string[] = []): string 
         : "So I’m closing this here because the remaining work is already tracked in the canonical issue.";
     case "low_signal_unmergeable_pr":
       return "So I’m closing this PR rather than keeping an unmergeable branch open. A new narrow PR that carries only the useful part is welcome.";
+    case "stalled_unproven_pr":
+      return "So I’m closing this for now to keep the review queue honest. Please reopen or open a fresh PR with real-behavior proof (a live run, logs, or a reproducible validation transcript) and it will be reviewed again.";
+    case "abandoned_pr":
+      return "So I’m closing this as inactive for now. If you pick the work back up, push a rebased branch with green checks and reopen (or open a fresh PR) and it will be reviewed again.";
     case "unconfirmed_product_direction":
       return "This is a proposal only until the separate default-off apply policy is enabled and all live maintainer-signal checks pass. A maintainer can sponsor the direction, request a narrower version, or apply `clawsweeper:human-review` to keep it open.";
     case "not_actionable_in_repo":
@@ -9385,6 +9367,11 @@ function reportReviewFindings(markdown: string): ReviewFinding[] {
     const body = line.match(/^\s+- body: (.*)$/);
     if (body?.[1]) {
       current.body = body[1];
+      continue;
+    }
+    const late = line.match(/^\s+- late: (true|false)$/);
+    if (late?.[1]) {
+      current.lateFinding = late[1] === "true";
       continue;
     }
     const confidence = line.match(/^\s+- confidence: ([0-9.]+)$/);
@@ -14351,28 +14338,30 @@ function renderCloseComment(options: {
 }
 
 function renderCloseCommentFromReport(markdown: string, reason: CloseReason): string {
-  return sanitizePublicSelfReferences(
-    renderCloseComment({
-      reason,
-      summary: reviewSectionValue(markdown, "summary"),
-      bestSolution: reviewSectionValue(markdown, "bestSolution"),
-      reproductionAssessment: reviewSectionValue(markdown, "reproductionAssessment"),
-      solutionAssessment: reviewSectionValue(markdown, "solutionAssessment"),
-      agentsPolicyStatus: reportAgentsPolicyStatus(markdown),
-      evidence: reportEvidence(markdown),
-      likelyOwners: reportLikelyOwners(markdown),
-      fixedPullRequest: fixedPullRequestFromReport(markdown),
-      securityReview: reportSecurityReview(markdown),
-      rootCauseCluster: reportRootCauseCluster(markdown),
-      reviewLine: closeReviewLineFromReport(markdown),
-      currentItem: {
-        repo: markdownRepository(markdown),
-        number: Number(frontMatterValue(markdown, "number")),
-        kind: (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
-      },
-    }),
-    Number(frontMatterValue(markdown, "number")),
-    (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+  return neutralizeReviewControlMarkers(
+    sanitizePublicSelfReferences(
+      renderCloseComment({
+        reason,
+        summary: reviewSectionValue(markdown, "summary"),
+        bestSolution: reviewSectionValue(markdown, "bestSolution"),
+        reproductionAssessment: reviewSectionValue(markdown, "reproductionAssessment"),
+        solutionAssessment: reviewSectionValue(markdown, "solutionAssessment"),
+        agentsPolicyStatus: reportAgentsPolicyStatus(markdown),
+        evidence: reportEvidence(markdown),
+        likelyOwners: reportLikelyOwners(markdown),
+        fixedPullRequest: fixedPullRequestFromReport(markdown),
+        securityReview: reportSecurityReview(markdown),
+        rootCauseCluster: reportRootCauseCluster(markdown),
+        reviewLine: closeReviewLineFromReport(markdown),
+        currentItem: {
+          repo: markdownRepository(markdown),
+          number: Number(frontMatterValue(markdown, "number")),
+          kind: (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+        },
+      }),
+      Number(frontMatterValue(markdown, "number")),
+      (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+    ),
   );
 }
 
@@ -14686,6 +14675,31 @@ function reviewFreshnessText(markdown: string): string {
   return timestamp ? ` _Reviewed ${timestamp}._` : "";
 }
 
+function reviewHistoryForRender(
+  markdown: string,
+  previousReviewCommentBody: string | undefined,
+): ReviewHistoryLedger {
+  if (frontMatterValue(markdown, "type") !== "pull_request") {
+    return { cycles: [], totalCompletedCycles: 0 };
+  }
+  const body = previousReviewCommentBody ?? "";
+  if (!body.trim()) return { cycles: [], totalCompletedCycles: 0 };
+  const history = parseReviewHistory(body);
+  const previousCycle = reviewHistoryCycleFromCommentBody(body);
+  if (!previousCycle) return history;
+  const reviewedAt = frontMatterValue(markdown, "reviewed_at");
+  if (reviewedAt && previousCycle.reviewedAt === reviewedAt) return history;
+  return appendReviewHistoryCycle(history, previousCycle);
+}
+
+function reviewHistoryForStaleComment(
+  previousReviewCommentBody: string | undefined,
+): ReviewHistoryLedger {
+  const body = previousReviewCommentBody ?? "";
+  const history = parseReviewHistory(body);
+  return appendReviewHistoryCycle(history, reviewHistoryCycleFromCommentBody(body));
+}
+
 function renderKeepOpenCommentFromReport(
   markdown: string,
   options: ReviewCommentRenderOptions = {},
@@ -14898,13 +14912,19 @@ function renderKeepOpenCommentFromReport(
   if (labelDetailsBlock) lines.push("", labelDetailsBlock);
   const evidenceDetailsBlock = collapsedDetailsBlock("Evidence reviewed", evidenceDetails);
   if (evidenceDetailsBlock) lines.push("", evidenceDetailsBlock);
+  const reviewHistoryBlock = renderReviewHistorySection(
+    reviewHistoryForRender(markdown, options.previousReviewCommentBody),
+  );
   if (isPullRequest && !reviewFailed) lines.push("", publicRankDetailsBlock());
   lines.push("", ...reviewWorkflowCallout());
-  return sanitizePublicSelfReferences(
-    lines.join("\n"),
-    Number(frontMatterValue(markdown, "number")),
-    (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+  const publicBody = neutralizeReviewControlMarkers(
+    sanitizePublicSelfReferences(
+      lines.join("\n"),
+      Number(frontMatterValue(markdown, "number")),
+      (frontMatterValue(markdown, "type") as ItemKind | undefined) ?? "issue",
+    ),
   );
+  return reviewHistoryBlock ? `${publicBody.trimEnd()}\n\n${reviewHistoryBlock}\n` : publicBody;
 }
 
 export function renderReviewCommentFromReport(
@@ -14986,7 +15006,7 @@ function unconfirmedProductDirectionDecisionBlockReason(
   }
   const exemptLabel = item.labels
     .map(normalizeLabelName)
-    .find((label) => UNCONFIRMED_PRODUCT_DIRECTION_EXEMPT_LABELS.has(label));
+    .find((label) => PR_AUTO_CLOSE_EXEMPT_LABELS.has(label));
   if (exemptLabel) return `${exemptLabel} exempts this PR from product-direction auto-close`;
   if (decision.itemCategory !== "feature") {
     return "unconfirmed_product_direction requires feature item category";
@@ -15008,6 +15028,64 @@ function unconfirmedProductDirectionDecisionBlockReason(
   }
   if (!["S", "A", "B", "C"].includes(decision.prRating.overallTier)) {
     return "unconfirmed_product_direction requires a quality-ready PR rating";
+  }
+  return null;
+}
+
+const STALLED_UNPROVEN_PROOF_STATUSES = new Set(["missing", "mock_only", "insufficient"]);
+const STALLED_UNPROVEN_RATING_TIERS = new Set(["D", "F"]);
+
+function externalPrCloseDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  closeReason: CloseReason,
+  exemptText: string,
+): string | null {
+  if (item.kind !== "pull_request") {
+    return `${closeReason} is allowed only for pull requests`;
+  }
+  if (!item.authorAssociation) return `${closeReason} requires author association`;
+  if (isMaintainerAuthorAssociation(item.authorAssociation)) {
+    return `${closeReason} cannot close maintainer-authored pull requests`;
+  }
+  const exemptLabel = prAutoCloseExemptLabel(item.labels);
+  if (exemptLabel) return `${exemptLabel} exempts this PR from ${exemptText}`;
+  return null;
+}
+
+function stalledUnprovenPrDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  decision: Decision,
+): string | null {
+  const externalBlock = externalPrCloseDecisionBlockReason(
+    item,
+    "stalled_unproven_pr",
+    "stalled-unproven auto-close",
+  );
+  if (externalBlock) return externalBlock;
+  if (!STALLED_UNPROVEN_PROOF_STATUSES.has(decision.realBehaviorProof.status)) {
+    return "stalled_unproven_pr requires missing, mock-only, or insufficient real behavior proof";
+  }
+  if (!STALLED_UNPROVEN_RATING_TIERS.has(decision.prRating.overallTier)) {
+    return "stalled_unproven_pr requires a D or F overall PR rating";
+  }
+  return null;
+}
+
+function abandonedPrDecisionBlockReason(
+  item: Pick<Item, "kind" | "labels"> & Partial<Pick<Item, "authorAssociation">>,
+  decision: Decision,
+): string | null {
+  const externalBlock = externalPrCloseDecisionBlockReason(
+    item,
+    "abandoned_pr",
+    "abandoned-PR auto-close",
+  );
+  if (externalBlock) return externalBlock;
+  if (
+    ["S", "A", "B"].includes(decision.prRating.overallTier) &&
+    ["sufficient", "override"].includes(decision.realBehaviorProof.status)
+  ) {
+    return "abandoned_pr cannot close a high-quality proven pull request";
   }
   return null;
 }
@@ -15068,6 +15146,26 @@ export function validateCloseDecision(
         ok: false,
         actionTaken: "skipped_invalid_decision",
         reason: productDirectionBlock,
+      };
+    }
+  }
+  if (decision.closeReason === "stalled_unproven_pr") {
+    const stalledUnprovenBlock = stalledUnprovenPrDecisionBlockReason(item, decision);
+    if (stalledUnprovenBlock) {
+      return {
+        ok: false,
+        actionTaken: "skipped_invalid_decision",
+        reason: stalledUnprovenBlock,
+      };
+    }
+  }
+  if (decision.closeReason === "abandoned_pr") {
+    const abandonedBlock = abandonedPrDecisionBlockReason(item, decision);
+    if (abandonedBlock) {
+      return {
+        ok: false,
+        actionTaken: "skipped_invalid_decision",
+        reason: abandonedBlock,
       };
     }
   }
@@ -15241,6 +15339,7 @@ function syncStalePullRequestReviewLabels(options: {
 function stalePullRequestReviewComment(options: {
   number: number;
   stale: StalePullRequestReviewHead;
+  previousReviewCommentBody?: string;
 }): string {
   const attrs = [
     `item=${markerAttributeValue(String(options.number))}`,
@@ -15248,6 +15347,9 @@ function stalePullRequestReviewComment(options: {
     `current_sha=${markerAttributeValue(options.stale.liveHeadSha)}`,
     "reason=stale_head",
   ].join(" ");
+  const history = renderReviewHistorySection(
+    reviewHistoryForStaleComment(options.previousReviewCommentBody),
+  );
   return [
     "Codex review: stale review; fresh review needed.",
     "",
@@ -15256,6 +15358,7 @@ function stalePullRequestReviewComment(options: {
     "",
     "**Next step**",
     "Run or wait for a fresh ClawSweeper review on the current PR head.",
+    ...(history ? ["", history] : []),
     "",
     `<!-- clawsweeper-review-status:stale ${attrs} -->`,
   ].join("\n");
@@ -15962,6 +16065,7 @@ function renderReviewFindingsReportSection(decision: Decision): string {
             finding,
           )}\``,
           `  - body: ${sentence(finding.body)}`,
+          ...(finding.lateFinding ? ["  - late: true"] : []),
           `  - confidence: ${confidenceText(finding.confidenceScore)}`,
         ].join("\n"),
       )
@@ -17323,6 +17427,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       ) {
         return false;
       }
+      if (
+        closeReason === "stalled_unproven_pr" &&
+        stalledUnprovenPrApplyBlockReasonSafe(number, item)
+      ) {
+        return false;
+      }
+      if (closeReason === "abandoned_pr" && abandonedPrApplyBlockReasonSafe(number, item)) {
+        return false;
+      }
       if (currentPrCloseCoverageProofGateBlock()) return false;
       return true;
     };
@@ -17568,6 +17681,23 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         continue;
       }
     }
+    if (
+      state === "open" &&
+      isCloseProposal &&
+      (closeReason === "stalled_unproven_pr" || closeReason === "abandoned_pr") &&
+      !syncCommentsOnly &&
+      (applyKind === "all" || item.kind === applyKind) &&
+      closeReasonEnabled(closeReason, applyCloseReasons)
+    ) {
+      const inactivityBlockReason =
+        closeReason === "stalled_unproven_pr"
+          ? stalledUnprovenPrApplyBlockReasonSafe(number, item)
+          : abandonedPrApplyBlockReasonSafe(number, item);
+      if (inactivityBlockReason) {
+        if (markApplySkipped("kept_open", inactivityBlockReason)) break;
+        continue;
+      }
+    }
     const existingReviewComment = issueReviewComment(number, [
       renderReviewCommentFromReport(markdown, closeReason ?? "none", { previousLabels }),
       reviewSectionValue(markdown, "closeComment"),
@@ -17694,9 +17824,22 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       renderOptions.hasOpenLinkedPullRequest =
         openClosingPullRequestApplyReason(currentClosingPullRequests) !== null;
     }
-    let reviewComment = stalePrReviewHead
-      ? stalePullRequestReviewComment({ number, stale: stalePrReviewHead })
-      : renderReviewCommentFromReport(markdown, closeReason ?? "none", renderOptions);
+    const renderCurrentReviewComment = (): string =>
+      stalePrReviewHead
+        ? stalePullRequestReviewComment({
+            number,
+            stale: stalePrReviewHead,
+            ...(renderOptions.previousReviewCommentBody
+              ? { previousReviewCommentBody: renderOptions.previousReviewCommentBody }
+              : {}),
+          })
+        : renderReviewCommentFromReport(markdown, closeReason ?? "none", renderOptions);
+    let reviewComment = renderCurrentReviewComment();
+    const existingReviewCommentBody = rawCommentBody(existingReviewComment);
+    if (existingReviewCommentBody.trim()) {
+      renderOptions.previousReviewCommentBody = existingReviewCommentBody;
+      reviewComment = renderCurrentReviewComment();
+    }
     let markedReviewComment = markedReviewCommentBody(number, reviewComment);
     let proofBlockedForCommentSync: PrCloseCoverageProofGateBlock | null = null;
     const protectedApplyReason = applyProtectedLabelReason(item.labels, closeReason);
@@ -18019,9 +18162,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         continue;
       }
     }
-    reviewComment = stalePrReviewHead
-      ? stalePullRequestReviewComment({ number, stale: stalePrReviewHead })
-      : renderReviewCommentFromReport(markdown, closeReason ?? "none", renderOptions);
+    reviewComment = renderCurrentReviewComment();
     markedReviewComment = markedReviewCommentBody(number, reviewComment);
     if (isCloseProposal && item.kind === "issue") {
       currentClosingPullRequests ??= closingPullRequestsForIssue(number);
@@ -18371,6 +18512,16 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         : null;
     if (lowSignalBlockReason) {
       if (markApplySkipped("kept_open", lowSignalBlockReason)) break;
+      continue;
+    }
+    const inactivityCloseBlockReason =
+      closeReason === "stalled_unproven_pr"
+        ? stalledUnprovenPrApplyBlockReasonSafe(number, item)
+        : closeReason === "abandoned_pr"
+          ? abandonedPrApplyBlockReasonSafe(number, item)
+          : null;
+    if (inactivityCloseBlockReason) {
+      if (markApplySkipped("kept_open", inactivityCloseBlockReason)) break;
       continue;
     }
     logProgress(`closing #${number}`);
