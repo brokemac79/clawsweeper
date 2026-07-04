@@ -19201,6 +19201,17 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     if (!isCloseProposal || !closeReason) {
       continue;
     }
+    const requiredMaintainerDecision = maintainerDecisionFromReport(markdown);
+    if (requiredMaintainerDecision?.required) {
+      if (
+        markApplySkipped(
+          "kept_open",
+          `maintainer decision required: ${requiredMaintainerDecision.question}`,
+        )
+      )
+        break;
+      continue;
+    }
     if (closedCount >= limit) break;
     if (applyKind !== "all" && item.kind !== applyKind) {
       if (recordApplySkipped("kept_open", `type is ${item.kind}; apply kind is ${applyKind}`))

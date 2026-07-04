@@ -309,6 +309,106 @@ if (/\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
   }
 });
 
+test("apply-decisions keeps required maintainer decisions open", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    const packetPath = join(root, "decision-packets", "321.json");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+    const synced = reportWithSyncedReviewComment(
+      implementedCloseReport({
+        labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
+        requires_product_decision: "true",
+        maintainer_decision: JSON.stringify(maintainerDecision),
+      }),
+      321,
+    );
+    writeFileSync(join(itemsDir, "321.md"), synced.report, "utf8");
+    const existingComment = {
+      id: 9321,
+      html_url: "https://github.com/openclaw/clawsweeper/issues/321#issuecomment-9321",
+      created_at: "2026-05-01T01:00:00Z",
+      updated_at: "2026-05-01T01:00:00Z",
+      user: { login: "clawsweeper[bot]" },
+      body: synced.comment,
+    };
+
+    const ghMock = `
+const { readFileSync } = require("fs");
+const rawArgs = process.argv.slice(2);
+const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
+const path = args.includes("-i") ? args[args.indexOf("-i") + 1] : args[1] || "";
+if (/\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
+  console.log(JSON.stringify([[${JSON.stringify(existingComment)}]]));
+} else if (/\\/issues\\/comments\\/9321$/.test(path) && args.includes("--method")) {
+  const inputPath = args[args.indexOf("--input") + 1];
+  const body = JSON.parse(readFileSync(inputPath, "utf8")).body;
+  console.log(JSON.stringify({ ...${JSON.stringify(existingComment)}, body }));
+} else if (/\\/issues\\/321$/.test(path)) {
+  console.log(JSON.stringify({
+    number: 321,
+    title: "Render work plans",
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:00:00Z",
+    closed_at: null,
+    state: "open",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: ["clawsweeper:needs-product-decision"],
+    comments: 1,
+    pull_request: null
+  }));
+} else if (/\\/issues\\/321\\/timeline/.test(path)) {
+  console.log(JSON.stringify([[]]));
+} else if (args[0] === "issue" && args[1] === "view") {
+  console.log(JSON.stringify({ closedByPullRequestsReferences: [] }));
+} else if (args[0] === "issue" && args[1] === "close") {
+  console.error("required maintainer decision reached close mutation");
+  process.exit(1);
+} else if (args[0] === "label" || args[0] === "issue") {
+  console.log("");
+} else {
+  console.error("unexpected gh args", JSON.stringify(args));
+  process.exit(1);
+}
+`;
+    withMockGh(root, ghMock, () => {
+      runApplyDecisionsForTest({
+        itemsDir,
+        closedDir,
+        plansDir,
+        reportPath,
+        extraArgs: ["--processed-limit", "2"],
+      });
+    });
+
+    assert.equal(existsSync(join(itemsDir, "321.md")), true);
+    assert.equal(existsSync(join(closedDir, "321.md")), false);
+    assert.equal(JSON.parse(readFileSync(packetPath, "utf8")).subject.state, "open");
+    assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), [
+      {
+        number: 321,
+        action: "review_comment_synced",
+        reason: "updated durable Codex review comment",
+      },
+      {
+        number: 321,
+        action: "kept_open",
+        reason: `maintainer decision required: ${maintainerDecision.question}`,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apply-decisions skips advisory labels for failed or stale kept-open reports", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
