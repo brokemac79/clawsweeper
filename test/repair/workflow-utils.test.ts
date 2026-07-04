@@ -243,6 +243,15 @@ test("workflow utilities summarize apply health with skip buckets and cursor", (
       skipped_locked_conversation: 1,
     },
   });
+  assert.deepEqual(summary.next_action_buckets, {
+    conversation_unlock: 1,
+    live_state_recovery: 1,
+    review_refresh: 2,
+  });
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_comment_auth")?.next_step,
+    "Repair the GitHub App write token before retrying comment sync.",
+  );
   assert.equal(summary.cursor?.next_after_number, 40);
 });
 
@@ -288,6 +297,15 @@ test("workflow utilities summarize comment-sync apply reports separately from cl
       skipped_stale_review_comment_sync: 1,
     },
   });
+  assert.deepEqual(summary.next_action_buckets, {
+    close_coverage_proof: 1,
+    review_refresh: 1,
+  });
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_stale_review_comment_sync")
+      ?.label,
+    "Refresh review state",
+  );
 });
 
 test("workflow utilities classify common apply skip reasons into next actions", () => {
@@ -302,6 +320,8 @@ test("workflow utilities classify common apply skip reasons into next actions", 
       { number: 40, action: "skipped_invalid_decision" },
       { number: 50, action: "skipped_open_closing_pr" },
       { number: 60, action: "skipped_maintainer_authored" },
+      { number: 70, action: "retry_pr_close_coverage_proof" },
+      { number: 80, action: "skipped_missing_record" },
     ]),
   );
 
@@ -316,16 +336,16 @@ test("workflow utilities classify common apply skip reasons into next actions", 
   });
 
   assert.deepEqual(summary.next_action_buckets, {
-    close_coverage_proof: 1,
+    close_coverage_proof: 2,
     defer_until_closing_pr: 1,
     maintainer_review: 2,
-    report_quality_repair: 1,
+    report_quality_repair: 2,
     stable_skip: 1,
   });
   assert.equal(
     summary.next_actions.find((action) => action.reason === "skipped_pr_close_coverage_proof")
       ?.next_step,
-    "Run or refresh close-coverage proof for the canonical/covered PR pair.",
+    "Run or refresh close-coverage proof for the canonical and covered PR pair.",
   );
   assert.equal(
     summary.next_actions.find((action) => action.reason === "skipped_open_closing_pr")?.bucket,
@@ -338,6 +358,14 @@ test("workflow utilities classify common apply skip reasons into next actions", 
   assert.equal(
     summary.next_actions.find((action) => action.reason === "skipped_invalid_decision")?.owner,
     "clawsweeper",
+  );
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "retry_pr_close_coverage_proof")?.label,
+    "Retry close proof",
+  );
+  assert.equal(
+    summary.next_actions.find((action) => action.reason === "skipped_missing_record")?.bucket,
+    "report_quality_repair",
   );
 });
 

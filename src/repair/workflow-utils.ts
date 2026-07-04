@@ -67,6 +67,7 @@ type ApplySkipNextAction = {
   bucket:
     | "review_refresh"
     | "close_coverage_proof"
+    | "conversation_unlock"
     | "maintainer_review"
     | "stable_skip"
     | "report_quality_repair"
@@ -81,6 +82,8 @@ type ApplySkipNextAction = {
   summary: string;
   next_step: string;
 };
+
+type ApplySkipNextActionDetail = Omit<ApplySkipNextAction, "reason" | "count">;
 const args = parseArgs(process.argv.slice(2));
 
 function runCli(): void {
@@ -490,6 +493,7 @@ function applyNextActionBucketRank(bucket: ApplySkipNextAction["bucket"]): numbe
     "close_coverage_proof",
     "report_quality_repair",
     "defer_until_closing_pr",
+    "conversation_unlock",
     "maintainer_review",
     "stable_skip",
     "already_resolved",
@@ -497,144 +501,147 @@ function applyNextActionBucketRank(bucket: ApplySkipNextAction["bucket"]): numbe
   ].indexOf(bucket);
 }
 
+const APPLY_SKIP_NEXT_ACTION_DETAILS: Record<string, ApplySkipNextActionDetail> = {
+  skipped_changed_since_review: {
+    bucket: "review_refresh",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Refresh review",
+    summary: "The item changed after the review that proposed closing it.",
+    next_step: "Queue a fresh ClawSweeper review before any close retry.",
+  },
+  skipped_stale_review_comment_sync: {
+    bucket: "review_refresh",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Refresh review state",
+    summary: "The durable review comment is newer than the local review report.",
+    next_step: "Queue a fresh review instead of overwriting the newer durable comment.",
+  },
+  skipped_pr_close_coverage_proof: {
+    bucket: "close_coverage_proof",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Add close proof",
+    summary: "The PR close proposal needs positive coverage proof before apply can close it.",
+    next_step: "Run or refresh close-coverage proof for the canonical and covered PR pair.",
+  },
+  retry_pr_close_coverage_proof: {
+    bucket: "close_coverage_proof",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Retry close proof",
+    summary: "The close-coverage proof check failed transiently before reaching a decision.",
+    next_step: "Inspect the proof failure, then retry after model and GitHub access recover.",
+  },
+  skipped_protected_label: maintainerDecisionAction(),
+  skipped_policy_exempt: maintainerDecisionAction(),
+  skipped_maintainer_authored: {
+    bucket: "maintainer_review",
+    owner: "maintainer",
+    retryable: false,
+    label: "Maintainer-authored",
+    summary: "Automation does not close maintainer-authored items without human judgement.",
+    next_step: "Route to maintainer review or close manually if the owner agrees.",
+  },
+  skipped_locked_conversation: {
+    bucket: "conversation_unlock",
+    owner: "maintainer",
+    retryable: false,
+    label: "Conversation locked",
+    summary: "GitHub blocked the durable comment write because the conversation is locked.",
+    next_step: "Unlock the conversation before retrying comment sync, or leave it unchanged.",
+  },
+  skipped_same_author_pair: {
+    bucket: "stable_skip",
+    owner: "none",
+    retryable: false,
+    label: "Stable skip",
+    summary:
+      "The source and canonical items have the same author, so automated duplicate close is intentionally conservative.",
+    next_step: "Leave as a stable skip unless maintainers change the same-author close policy.",
+  },
+  skipped_invalid_decision: reportRepairAction(),
+  skipped_missing_record: reportRepairAction(),
+  skipped_open_closing_pr: {
+    bucket: "defer_until_closing_pr",
+    owner: "github",
+    retryable: false,
+    label: "Wait for closing PR",
+    summary: "The item appears covered by a pull request that is still open.",
+    next_step: "Defer until the linked closing PR merges, closes, or changes state.",
+  },
+  skipped_runtime_budget: {
+    bucket: "run_budget",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Runtime budget",
+    summary: "The apply lane stopped because it reached its bounded runtime.",
+    next_step: "Let the next scheduled run continue; tune runtime or batch size if this repeats.",
+  },
+  skipped_live_fetch_failed: {
+    bucket: "live_state_recovery",
+    owner: "github",
+    retryable: true,
+    label: "Recover live check",
+    summary: "ClawSweeper could not confirm live GitHub state before mutating.",
+    next_step: "Inspect auth, API, or rate-limit failures and retry after live checks recover.",
+  },
+  skipped_comment_auth: {
+    bucket: "live_state_recovery",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Repair comment auth",
+    summary: "GitHub rejected the durable review comment write as unauthenticated.",
+    next_step: "Repair the GitHub App write token before retrying comment sync.",
+  },
+  skipped_not_open: alreadyResolvedAction(),
+  skipped_already_closed: alreadyResolvedAction(),
+  skipped_closed: alreadyResolvedAction(),
+};
+
 function applySkipNextAction(reason: string, count: number): ApplySkipNextAction {
-  if (reason === "skipped_changed_since_review") {
-    return {
-      reason,
-      count,
-      bucket: "review_refresh",
-      owner: "clawsweeper",
-      retryable: true,
-      label: "Refresh review",
-      summary: "The item changed after the review that proposed closing it.",
-      next_step: "Queue a fresh ClawSweeper review before any close retry.",
-    };
-  }
-  if (reason === "skipped_pr_close_coverage_proof") {
-    return {
-      reason,
-      count,
-      bucket: "close_coverage_proof",
-      owner: "clawsweeper",
-      retryable: true,
-      label: "Add close proof",
-      summary: "The PR close proposal needs coverage proof before it can be applied.",
-      next_step: "Run or refresh close-coverage proof for the canonical/covered PR pair.",
-    };
-  }
-  if (reason === "skipped_protected_label" || reason === "skipped_policy_exempt") {
-    return {
-      reason,
-      count,
-      bucket: "maintainer_review",
-      owner: "maintainer",
-      retryable: false,
-      label: "Maintainer decision",
-      summary: "A protected label or policy exemption blocks automated pruning.",
-      next_step: "Have a maintainer confirm the label/policy should remain or close manually.",
-    };
-  }
-  if (reason === "skipped_maintainer_authored") {
-    return {
-      reason,
-      count,
-      bucket: "maintainer_review",
-      owner: "maintainer",
-      retryable: false,
-      label: "Maintainer-authored",
-      summary: "Automation does not close maintainer-authored items without human judgement.",
-      next_step: "Route to maintainer review or close manually if the owner agrees.",
-    };
-  }
-  if (reason === "skipped_same_author_pair") {
-    return {
-      reason,
-      count,
-      bucket: "stable_skip",
-      owner: "none",
-      retryable: false,
-      label: "Stable skip",
-      summary:
-        "The source and canonical items have the same author, so automated duplicate close is intentionally conservative.",
-      next_step: "Leave as a stable skip unless maintainers change the same-author close policy.",
-    };
-  }
-  if (reason === "skipped_invalid_decision") {
-    return {
-      reason,
-      count,
-      bucket: "report_quality_repair",
-      owner: "clawsweeper",
-      retryable: true,
-      label: "Repair review report",
-      summary: "The durable review decision was incomplete or invalid for apply.",
-      next_step: "Queue report-quality repair or re-review so the close decision becomes valid.",
-    };
-  }
-  if (reason === "skipped_open_closing_pr") {
-    return {
-      reason,
-      count,
-      bucket: "defer_until_closing_pr",
-      owner: "github",
-      retryable: false,
-      label: "Wait for closing PR",
-      summary: "The item appears covered by a pull request that is still open.",
-      next_step: "Defer until the linked closing PR merges, closes, or changes state.",
-    };
-  }
-  if (reason === "skipped_runtime_budget") {
-    return {
-      reason,
-      count,
-      bucket: "run_budget",
-      owner: "clawsweeper",
-      retryable: true,
-      label: "Runtime budget",
-      summary: "The apply lane stopped because it reached its bounded runtime.",
-      next_step: "Let the next scheduled run continue; tune runtime or batch size if this repeats.",
-    };
-  }
-  if (reason === "skipped_live_fetch_failed") {
-    return {
-      reason,
-      count,
-      bucket: "live_state_recovery",
-      owner: "github",
-      retryable: true,
-      label: "Recover live check",
-      summary: "ClawSweeper could not confirm live GitHub state before mutating.",
-      next_step:
-        "Inspect auth, API, or rate-limit failures and retry only after live checks recover.",
-    };
-  }
-  if (
-    reason === "skipped_not_open" ||
-    reason === "skipped_already_closed" ||
-    reason === "skipped_closed"
-  ) {
-    return {
-      reason,
-      count,
-      bucket: "already_resolved",
-      owner: "none",
-      retryable: false,
-      label: "Already resolved",
-      summary: "The item was not open by the time apply checked it.",
-      next_step:
-        "No action is normally needed; investigate only if this bucket dominates repeated runs.",
-    };
-  }
-  return {
-    reason,
-    count,
+  const detail = APPLY_SKIP_NEXT_ACTION_DETAILS[reason] ?? {
     bucket: "inspect",
     owner: "maintainer",
     retryable: false,
     label: "Inspect skip",
     summary: "Apply reported an unmapped skip bucket.",
-    next_step:
-      "Inspect the workflow run and add a deterministic next-action mapping if this repeats.",
+    next_step: "Inspect the workflow run and add a deterministic mapping if this repeats.",
+  };
+  return { reason, count, ...detail };
+}
+
+function maintainerDecisionAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "maintainer_review",
+    owner: "maintainer",
+    retryable: false,
+    label: "Maintainer decision",
+    summary: "A protected label or policy exemption blocks automated pruning.",
+    next_step: "Confirm the policy should remain, or close manually if it should not.",
+  };
+}
+
+function reportRepairAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "report_quality_repair",
+    owner: "clawsweeper",
+    retryable: true,
+    label: "Repair review report",
+    summary: "The durable review record is missing or invalid for apply.",
+    next_step: "Queue a fresh review so apply receives a complete, valid decision.",
+  };
+}
+
+function alreadyResolvedAction(): ApplySkipNextActionDetail {
+  return {
+    bucket: "already_resolved",
+    owner: "none",
+    retryable: false,
+    label: "Already resolved",
+    summary: "The item was not open by the time apply checked it.",
+    next_step: "No action is needed unless this bucket dominates repeated runs.",
   };
 }
 function applyReportHealthSummary(options: {

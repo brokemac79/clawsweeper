@@ -6958,6 +6958,7 @@ function applyHealthBucketLabel(bucket) {
   const labels = {
     already_resolved: "already resolved",
     close_coverage_proof: "needs close proof",
+    conversation_unlock: "unlock conversation",
     defer_until_closing_pr: "defer for PR state",
     inspect: "inspect skips",
     live_state_recovery: "live check recovery",
