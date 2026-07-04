@@ -108,9 +108,13 @@ import {
 } from "./clawsweeper-args.js";
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
 import {
+  emptyMaintainerDecision,
+  maintainerDecisionFromReport,
+  parseMaintainerDecision,
   renderDecisionPacketPublicBlock,
   syncDecisionPacketRecord,
   type DecisionPacketSubjectState,
+  type MaintainerDecision,
 } from "./decision-packets.js";
 import {
   appendReviewHistoryCycle,
@@ -517,6 +521,7 @@ interface Decision {
   likelyOwners: LikelyOwner[];
   risks: string[];
   bestSolution: string;
+  maintainerDecision: MaintainerDecision;
   triagePriority: TriagePriority;
   impactLabels: ImpactLabelName[];
   mergeRiskLabels: MergeRiskLabelName[];
@@ -1759,6 +1764,7 @@ const DECISION_SCHEMA_KEYS = new Set([
   "likelyOwners",
   "risks",
   "bestSolution",
+  "maintainerDecision",
   "triagePriority",
   "impactLabels",
   "mergeRiskLabels",
@@ -1880,6 +1886,7 @@ const REVIEW_SECTIONS = {
   summary: "Summary",
   changeSummary: "What This Changes",
   bestSolution: "Best Possible Solution",
+  maintainerDecision: "Maintainer Decision",
   reproductionAssessment: "Reproduction Assessment",
   solutionAssessment: "Solution Assessment",
   visionFit: "Vision Fit",
@@ -2664,6 +2671,18 @@ function validateMergeRiskOptions(
   }
 }
 
+function validateMaintainerDecisionOwner(
+  decision: Pick<Decision, "maintainerDecision" | "likelyOwners">,
+): void {
+  if (!decision.maintainerDecision.required) return;
+  const selected = decision.maintainerDecision.likelyOwner.person;
+  if (!decision.likelyOwners.some((owner) => owner.person === selected)) {
+    throw new Error(
+      "decision.maintainerDecision.likelyOwner.person must match decision.likelyOwners",
+    );
+  }
+}
+
 function parseLabelJustification(value: unknown, path: string): LabelJustification {
   const record = requireRecord(value, path);
   rejectUnexpectedKeys(record, LABEL_JUSTIFICATION_SCHEMA_KEYS, path);
@@ -2833,6 +2852,7 @@ function normalizeDecisionForItem(
     ...decision,
     reviewFindings,
     bestSolution: CLEAN_OPENCLAW_PR_REVIEW_NEXT_STEP,
+    maintainerDecision: emptyMaintainerDecision(),
     triagePriority: decision.triagePriority,
     mergeRiskOptions: decision.mergeRiskOptions,
     labelJustifications: decision.labelJustifications,
@@ -3168,6 +3188,10 @@ export function parseDecision(value: unknown, item?: DecisionNormalizationItem):
       (risk) => !isEnvironmentAccessCaveat(risk),
     ),
     bestSolution: requireString(record.bestSolution, "decision.bestSolution"),
+    maintainerDecision: parseMaintainerDecision(
+      record.maintainerDecision,
+      "decision.maintainerDecision",
+    ),
     triagePriority: requireEnum(
       record.triagePriority,
       TRIAGE_PRIORITIES,
@@ -3265,6 +3289,7 @@ export function parseDecision(value: unknown, item?: DecisionNormalizationItem):
     workLikelyFiles: requireStringArray(record.workLikelyFiles, "decision.workLikelyFiles"),
   };
   validateMergeRiskOptions(decision);
+  validateMaintainerDecisionOwner(decision);
   validateLabelJustifications(decision);
   return normalizeDecisionForItem(decision, item);
 }
@@ -7510,6 +7535,7 @@ function codexFailureDecision(
     ],
     risks: ["No close action taken because the review did not complete."],
     bestSolution: "Retry the Codex review after fixing the execution failure.",
+    maintainerDecision: emptyMaintainerDecision(),
     triagePriority: "none",
     impactLabels: [],
     mergeRiskLabels: [],
@@ -13004,6 +13030,7 @@ function reportDecision(markdown: string, closeReason: CloseReason): Decision {
     likelyOwners: reportLikelyOwners(markdown),
     risks: [],
     bestSolution: reviewSectionValue(markdown, "bestSolution"),
+    maintainerDecision: maintainerDecisionFromReport(markdown) ?? emptyMaintainerDecision(),
     triagePriority,
     impactLabels,
     mergeRiskLabels,
@@ -16444,6 +16471,36 @@ function renderRepairWorkPromptReportSection(decision: Decision): string {
   return workPrompt ? `\n\n## ${REVIEW_SECTIONS.repairWorkPrompt}\n\n${workPrompt}` : "";
 }
 
+function renderMaintainerDecisionReportSection(decision: Decision): string {
+  const maintainerDecision = decision.maintainerDecision;
+  if (!maintainerDecision.required) return "Required: false";
+  const options = maintainerDecision.options
+    .map(
+      (option) =>
+        `- **${option.title}${option.recommended ? " (recommended)" : ""}:** ${option.body}`,
+    )
+    .join("\n");
+  return [
+    "Required: true",
+    "",
+    `Kind: ${maintainerDecision.kind}`,
+    "",
+    `Question: ${maintainerDecision.question}`,
+    "",
+    `Rationale: ${maintainerDecision.rationale}`,
+    "",
+    `Likely owner: ${maintainerDecision.likelyOwner.person}`,
+    "",
+    `Owner reason: ${maintainerDecision.likelyOwner.reason}`,
+    "",
+    `Owner confidence: ${maintainerDecision.likelyOwner.confidence}`,
+    "",
+    "Options:",
+    "",
+    options,
+  ].join("\n");
+}
+
 function renderVisionFitReportSection(decision: Decision): string {
   return [
     `Status: ${decision.visionFit}`,
@@ -16687,6 +16744,7 @@ function markdownFor(options: {
         .join("\n")
     : "- none";
   const bestSolution = options.decision.bestSolution.trim() || "_Not provided._";
+  const maintainerDecision = renderMaintainerDecisionReportSection(options.decision);
   const reproductionAssessment =
     options.decision.reproductionAssessment.trim() || "_Not provided._";
   const solutionAssessment = options.decision.solutionAssessment.trim() || "_Not provided._";
@@ -16774,6 +16832,7 @@ work_cluster_refs: ${jsonFrontMatterValue(options.decision.workClusterRefs)}
 root_cause_cluster: ${JSON.stringify(options.decision.rootCauseCluster)}
 work_validation: ${jsonFrontMatterValue(options.decision.workValidation)}
 work_likely_files: ${jsonFrontMatterValue(options.decision.workLikelyFiles)}
+maintainer_decision: ${JSON.stringify(options.decision.maintainerDecision)}
 triage_priority: ${options.decision.triagePriority}
 impact_labels: ${jsonFrontMatterValue(options.decision.impactLabels)}
 merge_risk_labels: ${jsonFrontMatterValue(options.decision.mergeRiskLabels)}
@@ -16863,6 +16922,10 @@ ${options.decision.changeSummary}
 ## ${REVIEW_SECTIONS.bestSolution}
 
 ${bestSolution}
+
+## ${REVIEW_SECTIONS.maintainerDecision}
+
+${maintainerDecision}
 
 ## ${REVIEW_SECTIONS.reproductionAssessment}
 

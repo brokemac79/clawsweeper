@@ -5,43 +5,53 @@ import test from "node:test";
 
 import {
   buildDecisionPacketFromReport,
+  emptyMaintainerDecision,
+  parseMaintainerDecision,
   syncDecisionPacketRecord,
 } from "../dist/decision-packets.js";
 import { tmpPrefix } from "./helpers.ts";
 
-test("decision packets derive product decision data from report labels and frontmatter", () => {
-  const report = `${workPlanCandidateReport({
+const productDecision = {
+  required: true,
+  kind: "product_direction",
+  question: "Should config.patch replace redacted array entries or preserve them?",
+  rationale:
+    "Both behaviors are coherent, but choosing one defines the public configuration contract.",
+  options: [
+    {
+      title: "Preserve redacted entries",
+      body: "Merge visible values into the stored array without deleting redacted entries.",
+      recommended: true,
+    },
+    {
+      title: "Replace the array",
+      body: "Treat the supplied array as authoritative and document the destructive behavior.",
+      recommended: false,
+    },
+  ],
+  likelyOwner: {
+    person: "@config-owner",
+    reason: "Recent history shows ownership of config.patch semantics.",
+    confidence: "high",
+  },
+};
+
+test("decision packets preserve the exact Codex-authored maintainer decision", () => {
+  const report = decisionReport({
     number: 81234,
     repository: "openclaw/openclaw",
     type: "pull_request",
-    title: "config.patch redacted array write",
+    title: JSON.stringify("config.patch redacted array write"),
     url: "https://github.com/openclaw/openclaw/pull/81234",
-    labels: JSON.stringify(["clawsweeper:needs-product-decision", "app: web-ui", "P1"]),
-    requires_product_decision: "true",
-    confidence: "high",
+    labels: JSON.stringify(["clawsweeper:needs-product-decision", "P1"]),
+    triage_priority: "P1",
     item_updated_at: "2026-06-20T00:00:00Z",
     current_item_updated_at: "2026-06-23T01:00:00Z",
     pull_head_sha: "abc123",
     main_sha: "main456",
     review_comment_url: "https://github.com/openclaw/openclaw/pull/81234#issuecomment-99",
-    work_cluster_refs: JSON.stringify([
-      "https://github.com/openclaw/openclaw/pull/81111",
-      "#81112",
-      "openclaw/clawhub#44",
-    ]),
-    root_cause_cluster: JSON.stringify({
-      members: [{ ref: "https://github.com/openclaw/openclaw/issues/81113" }],
-    }),
-  })}
-
-## Best Possible Solution
-
-Ask the owning product maintainer to decide whether redacted full-array writes are valid.
-
-## Risks / Open Questions
-
-- The current implementation may overwrite redacted array entries.
-`;
+    maintainer_decision: JSON.stringify(productDecision),
+  });
 
   const packet = buildDecisionPacketFromReport(report, {
     generatedAt: "2026-06-23T12:00:00.000Z",
@@ -49,152 +59,71 @@ Ask the owning product maintainer to decide whether redacted full-array writes a
   });
 
   assert.ok(packet);
-  assert.equal(packet.lane, "product_contract");
+  assert.equal(packet.lane, "product_direction");
   assert.equal(packet.priority, "P1");
-  assert.equal(packet.evidenceStrength, "high");
-  assert.equal(packet.subject.repo, "openclaw/openclaw");
-  assert.equal(packet.subject.kind, "pull_request");
+  assert.equal(packet.question, productDecision.question);
+  assert.equal(packet.rationale, productDecision.rationale);
+  assert.deepEqual(packet.options, productDecision.options);
+  assert.deepEqual(packet.recommendation, productDecision.options[0]);
+  assert.deepEqual(packet.likelyOwner, productDecision.likelyOwner);
   assert.equal(packet.subject.headSha, "abc123");
   assert.equal(packet.subject.updatedAt, "2026-06-23T01:00:00Z");
-  assert.deepEqual(packet.subject.labels, [
-    "clawsweeper:needs-product-decision",
-    "app: web-ui",
-    "P1",
-  ]);
-  assert.deepEqual(packet.suggestedLabels, [
-    "clawsweeper:needs-product-decision",
-    "app: web-ui",
-    "P1",
-  ]);
-  assert.equal(
-    packet.recommendedActions[0],
-    "Ask the owning product maintainer to decide whether redacted full-array writes are valid.",
-  );
-  assert.deepEqual(packet.risks, [
-    "The current implementation may overwrite redacted array entries.",
-  ]);
-  assert.deepEqual(
-    packet.linkedItems.map((item) => ({
-      repo: item.repo,
-      kind: item.kind,
-      number: item.number,
-    })),
-    [
-      { repo: "openclaw/openclaw", kind: "pull_request", number: 81111 },
-      { repo: "openclaw/openclaw", kind: "issue", number: 81112 },
-      { repo: "openclaw/clawhub", kind: "issue", number: 44 },
-      { repo: "openclaw/openclaw", kind: "issue", number: 81113 },
-    ],
-  );
-  assert.equal(
-    packet.linkedItems.every((item) => !("state" in item)),
-    true,
-  );
-  assert.equal("areaLabel" in packet, false);
+  assert.equal(packet.updatedAt, "2026-06-23T01:00:00Z");
 });
 
-test("decision packets preserve legacy comma-separated labels", () => {
-  const packet = buildDecisionPacketFromReport(
-    workPlanCandidateReport({
-      number: 81235,
-      repository: "openclaw/openclaw",
-      labels: "clawsweeper:needs-product-decision, status: needs proof, P2",
-    }),
-    {
-      generatedAt: "2026-06-23T12:00:00.000Z",
-      reportPath: "records/openclaw-openclaw/items/81235.md",
-    },
-  );
+test("labels and report prose cannot invent a maintainer decision", () => {
+  const report = `${decisionReport({
+    labels: JSON.stringify([
+      "clawsweeper:needs-product-decision",
+      "clawsweeper:needs-security-review",
+      "release-blocker",
+    ]),
+    requires_product_decision: "true",
+  })}\n\n## Best Possible Solution\n\nAsk a maintainer what should happen next.\n`;
 
-  assert.ok(packet);
-  assert.equal(packet.lane, "product_contract");
-  assert.deepEqual(packet.subject.labels, [
-    "clawsweeper:needs-product-decision",
-    "status: needs proof",
-    "P2",
-  ]);
+  assert.equal(buildDecisionPacketFromReport(report), null);
 });
 
-test("decision packets prefer reconciled current state", () => {
+test("maintainer decision validation requires one recommendation and an exact owner", () => {
+  assert.throws(
+    () =>
+      parseMaintainerDecision({
+        ...productDecision,
+        options: productDecision.options.map((option) => ({ ...option, recommended: false })),
+      }),
+    /exactly 1 recommended option/,
+  );
+  assert.throws(
+    () =>
+      parseMaintainerDecision({
+        ...emptyMaintainerDecision(),
+        question: "A label-derived question",
+      }),
+    /must be empty when no decision is required/,
+  );
+});
+
+test("decision packets prefer reconciled subject state", () => {
   const packet = buildDecisionPacketFromReport(
-    workPlanCandidateReport({
-      number: 81236,
-      repository: "openclaw/openclaw",
-      labels: "clawsweeper:needs-product-decision",
+    decisionReport({
       action_taken: "kept_open",
       current_state: "closed",
+      maintainer_decision: JSON.stringify(productDecision),
     }),
-    {
-      generatedAt: "2026-06-23T12:00:00.000Z",
-      reportPath: "records/openclaw-openclaw/closed/81236.md",
-    },
+    { generatedAt: "2026-06-23T12:00:00.000Z" },
   );
 
   assert.ok(packet);
   assert.equal(packet.subject.state, "closed");
 });
 
-test("decision packets read CRLF report sections", () => {
-  const report = `${workPlanCandidateReport({
-    number: 81237,
-    repository: "openclaw/openclaw",
-    labels: JSON.stringify([]),
-  })}
-
-## Security Review
-
-Status: needs_attention
-Concern: Requires maintainer security review.
-`.replace(/\n/g, "\r\n");
-  const packet = buildDecisionPacketFromReport(report, {
-    generatedAt: "2026-06-23T12:00:00.000Z",
-    reportPath: "records/openclaw-openclaw/items/81237.md",
-  });
-
-  assert.ok(packet);
-  assert.equal(packet.lane, "security_boundary");
-});
-
-test("decision packets surface proof and release trigger labels", () => {
-  const packet = buildDecisionPacketFromReport(
-    workPlanCandidateReport({
-      number: 81238,
-      repository: "openclaw/openclaw",
-      labels: "release-blocker, beta-blocker, triage: needs-real-behavior-proof",
-    }),
-    {
-      generatedAt: "2026-06-23T12:00:00.000Z",
-      reportPath: "records/openclaw-openclaw/items/81238.md",
-    },
-  );
-
-  assert.ok(packet);
-  assert.equal(packet.lane, "proof_or_repro_decision");
-  assert.deepEqual(packet.suggestedLabels, [
-    "release-blocker",
-    "beta-blocker",
-    "triage: needs-real-behavior-proof",
-  ]);
-  assert.match(
-    packet.evidence.find((entry) => entry.label === "Decision labels")?.detail ?? "",
-    /triage: needs-real-behavior-proof/,
-  );
-});
-
-test("decision packet sync writes packet JSON and frontmatter pointers", () => {
+test("decision packet sync writes pointers and removes stale generated state", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
-    const packetsDir = join(root, "records", "openclaw-openclaw", "decision-packets");
-    const reportPath = join(root, "records", "openclaw-openclaw", "items", "321.md");
-    const markdown = workPlanCandidateReport({
-      repository: "openclaw/openclaw",
-      labels: JSON.stringify(["clawsweeper:needs-maintainer-review", "channel: telegram"]),
-      work_status: "manual_review",
-      confidence: "medium",
-    });
-
-    const result = syncDecisionPacketRecord({
-      markdown,
+    const packetsDir = join(root, "records", "openclaw-clawsweeper", "decision-packets");
+    const reportPath = join(root, "records", "openclaw-clawsweeper", "items", "321.md");
+    const first = syncDecisionPacketRecord({
+      markdown: decisionReport({ maintainer_decision: JSON.stringify(productDecision) }),
       reportPath,
       packetsDir,
       repoRoot: root,
@@ -202,59 +131,56 @@ test("decision packet sync writes packet JSON and frontmatter pointers", () => {
       subjectState: "open",
     });
 
-    assert.ok(result.packet);
-    assert.ok(result.packetPath);
-    assert.ok(existsSync(result.packetPath));
+    assert.ok(first.packetPath);
+    assert.ok(existsSync(first.packetPath));
     assert.match(
-      result.markdown,
-      /^decision_packet_path: records\/openclaw-openclaw\/decision-packets\/321\.json$/m,
+      first.markdown,
+      /^decision_packet_path: records\/openclaw-clawsweeper\/decision-packets\/321\.json$/m,
     );
-    assert.match(result.markdown, /^decision_packet_sha256: [a-f0-9]{64}$/m);
-    const packet = JSON.parse(readFileSync(result.packetPath, "utf8"));
-    assert.equal(packet.lane, "maintainer_review");
-    assert.deepEqual(packet.subject.labels, [
-      "clawsweeper:needs-maintainer-review",
-      "channel: telegram",
-    ]);
+    assert.match(first.markdown, /^decision_packet_sha256: [a-f0-9]{64}$/m);
+    const stored = JSON.parse(readFileSync(first.packetPath, "utf8"));
+    assert.equal(stored.question, productDecision.question);
+
+    const second = syncDecisionPacketRecord({
+      markdown: first.markdown.replace(
+        /^maintainer_decision: .*$/m,
+        `maintainer_decision: ${JSON.stringify(emptyMaintainerDecision())}`,
+      ),
+      reportPath,
+      packetsDir,
+      repoRoot: root,
+    });
+
+    assert.equal(second.packet, null);
+    assert.equal(existsSync(first.packetPath), false);
+    assert.match(second.markdown, /^decision_packet_path: none$/m);
+    assert.match(second.markdown, /^decision_packet_sha256: none$/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-function workPlanCandidateReport(overrides = {}) {
+function decisionReport(overrides: Record<string, unknown> = {}): string {
   const frontmatter = {
     number: 321,
     repository: "openclaw/clawsweeper",
     type: "issue",
-    title: "Render work plans",
-    reviewed_at: new Date().toISOString(),
-    review_status: "complete",
-    local_checkout_access: "verified",
-    decision: "keep_open",
+    title: JSON.stringify("Render maintainer decision"),
+    url: "https://github.com/openclaw/clawsweeper/issues/321",
+    reviewed_at: "2026-06-23T10:00:00.000Z",
+    item_created_at: "2026-06-20T00:00:00Z",
+    item_updated_at: "2026-06-21T00:00:00Z",
+    labels: JSON.stringify([]),
+    triage_priority: "P2",
     action_taken: "kept_open",
-    work_candidate: "queue_fix_pr",
-    work_status: "candidate",
-    work_priority: "medium",
-    work_confidence: "high",
-    work_likely_files: JSON.stringify(["src/clawsweeper.ts", "test/clawsweeper.test.ts"]),
-    work_validation: JSON.stringify(["pnpm run check"]),
-    work_cluster_refs: JSON.stringify(["openclaw/clawsweeper#26"]),
     ...overrides,
   };
   return `---
 ${Object.entries(frontmatter)
-  .map(([key, value]) => `${key}: ${value}`)
+  .map(([key, value]) => `${key}: ${String(value)}`)
   .join("\n")}
 ---
 
-# #321: Render work plans
-
-## Summary
-
-The dashboard has queue_fix_pr candidates but no generated coding plan.
-
-## Repair Work Prompt
-
-Render generated plan markdown from existing report fields.
+# #321: Render maintainer decision
 `;
 }

@@ -51,6 +51,30 @@ import {
   workPlanCandidateReport,
 } from "./helpers.ts";
 
+const maintainerDecision = {
+  required: true,
+  kind: "product_direction",
+  question: "Should this product contract be accepted?",
+  rationale: "The implementation is valid only if maintainers choose this public behavior.",
+  options: [
+    {
+      title: "Accept the contract",
+      body: "Adopt and document the proposed behavior.",
+      recommended: true,
+    },
+    {
+      title: "Keep the current contract",
+      body: "Close the proposal without changing current behavior.",
+      recommended: false,
+    },
+  ],
+  likelyOwner: {
+    person: "@owner",
+    reason: "Recent history shows ownership of this contract.",
+    confidence: "high",
+  },
+};
+
 test("review comments include a compact maintainer decision packet block", () => {
   const comment = renderReviewCommentFromReport(
     workPlanCandidateReport({
@@ -58,13 +82,15 @@ test("review comments include a compact maintainer decision packet block", () =>
       action_taken: "kept_open",
       labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
       requires_product_decision: "true",
+      maintainer_decision: JSON.stringify(maintainerDecision),
     }),
     "none",
   );
 
   assert.match(comment, /\*\*Maintainer decision needed\*\*/);
-  assert.match(comment, /Lane: Product\/API contract\./);
-  assert.match(comment, /Should this product\/API contract direction be accepted\?/);
+  assert.match(comment, /Should this product contract be accepted\?/);
+  assert.match(comment, /Accept the contract \(recommended\)/);
+  assert.match(comment, /Likely owner: @owner/);
 });
 
 test("apply-decisions archives live-closed skipped records without reopening close gates", () => {
@@ -150,6 +176,7 @@ test("apply-decisions writes decision packets for changed-since-review reports",
       implementedCloseReport({
         labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
         requires_product_decision: "true",
+        maintainer_decision: JSON.stringify(maintainerDecision),
         item_snapshot_hash: "reviewed-snapshot-321",
         item_updated_at: "2026-05-01T00:00:00Z",
       }),
