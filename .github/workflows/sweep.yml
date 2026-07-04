@@ -2724,7 +2724,7 @@ jobs:
               {
                 for run_status in in_progress pending queued waiting requested; do
                   gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100&status=${run_status}" \
-                    --jq '.workflow_runs[] | {databaseId:.id, workflowName:.name, displayTitle:.display_title, status:.status, createdAt:.created_at, updatedAt:.updated_at}' 2>/dev/null || true
+                    --jq '.workflow_runs[] | {databaseId:.id, workflowPath:.path, displayTitle:.display_title, status:.status, createdAt:.created_at, updatedAt:.updated_at}' 2>/dev/null || true
                 done
               } | jq -s '.'
             )"
@@ -2746,7 +2746,7 @@ jobs:
             const queued = new Set(["pending", "queued", "waiting", "requested"]);
             function activeRun(run) {
               if (String(run.databaseId || "") === currentRunId) return false;
-              if (run.workflowName !== "ClawSweeper") return false;
+              if (run.workflowPath !== ".github/workflows/sweep.yml") return false;
               if (String(run.displayTitle || "") !== expectedTitle) return false;
               const status = String(run.status || "");
               if (!active.has(status)) return false;

@@ -199,6 +199,10 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
     continueStep,
     /gh api --paginate "repos\/\$\{\{ github\.repository \}\}\/actions\/runs\?per_page=100&status=\$\{run_status\}"/,
   );
+  assert.match(continueStep, /workflowPath:\.path/);
+  assert.match(continueStep, /run\.workflowPath !== "\.github\/workflows\/sweep\.yml"/);
+  assert.doesNotMatch(continueStep, /workflowName:\.name/);
+  assert.doesNotMatch(continueStep, /run\.workflowName !== "ClawSweeper"/);
   assert.doesNotMatch(continueStep, /gh run list/);
   assert.match(continueStep, /const seen = new Set\(\)/);
   assert.match(continueStep, /seen\.has\(id\)/);
