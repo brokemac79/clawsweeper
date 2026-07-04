@@ -2852,7 +2852,6 @@ function normalizeDecisionForItem(
     ...decision,
     reviewFindings,
     bestSolution: CLEAN_OPENCLAW_PR_REVIEW_NEXT_STEP,
-    maintainerDecision: emptyMaintainerDecision(),
     triagePriority: decision.triagePriority,
     mergeRiskOptions: decision.mergeRiskOptions,
     labelJustifications: decision.labelJustifications,
@@ -15840,6 +15839,9 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     return markers.join("\n");
   };
 
+  if (maintainerDecisionFromReport(markdown)?.required) {
+    return humanReviewMarkers();
+  }
   if (frontMatterValue(markdown, "review_status") === "failed") {
     return humanReviewMarkers();
   }

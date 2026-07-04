@@ -96,6 +96,9 @@ test("review comments include a compact maintainer decision packet block", () =>
 test("close proposals that require maintainer decisions render as kept open", () => {
   const comment = renderReviewCommentFromReport(
     implementedCloseReport({
+      repository: "openclaw/openclaw",
+      type: "pull_request",
+      pull_head_sha: "abc123def456",
       labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
       requires_product_decision: "true",
       maintainer_decision: JSON.stringify(maintainerDecision),
@@ -107,7 +110,10 @@ test("close proposals that require maintainer decisions render as kept open", ()
   assert.match(comment, /Should this product contract be accepted\?/);
   assert.match(comment, /Accept the contract \(recommended\)/);
   assert.match(comment, /Likely owner: @owner/);
-  assert.doesNotMatch(comment, /Closing this issue/);
+  assert.match(comment, /clawsweeper-verdict:needs-human/);
+  assert.doesNotMatch(comment, /Closing this PR/);
+  assert.doesNotMatch(comment, /clawsweeper-verdict:close/);
+  assert.doesNotMatch(comment, /clawsweeper-action:close-required/);
 });
 
 test("apply-decisions archives live-closed skipped records without reopening close gates", () => {
