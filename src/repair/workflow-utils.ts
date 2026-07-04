@@ -928,7 +928,7 @@ export function proposedPrCloseCoverageItemNumbers(options: ProposedItemOptions)
   );
 }
 
-type ProposedItemSelection = "all" | "pr-close-coverage-proof";
+type ProposedItemSelection = "all" | "pr-close-coverage-proof" | "quality-summary";
 
 type ProposedItemCandidate = {
   number: number;
@@ -971,7 +971,6 @@ function selectedProposedItemCandidates(
 
   const allowedReasons = new Set([
     "cannot_reproduce",
-    "abandoned_pr",
     "clawhub",
     "duplicate_or_superseded",
     "incoherent",
@@ -980,9 +979,9 @@ function selectedProposedItemCandidates(
     "mostly_implemented_on_main",
     "not_actionable_in_repo",
     "stale_insufficient_info",
-    "stalled_unproven_pr",
     "unconfirmed_product_direction",
   ]);
+  const qualitySummaryOnlyReasons = new Set(["abandoned_pr", "stalled_unproven_pr"]);
   const allowedCloseReasons =
     options.applyCloseReasons === "all"
       ? null
@@ -1015,7 +1014,10 @@ function selectedProposedItemCandidates(
         decision === "close" &&
         confidence === "high" &&
         isSelectableCloseAction(action, reason) &&
-        allowedForTarget(options.targetRepo, type, reason, allowedReasons) &&
+        (allowedForTarget(options.targetRepo, type, reason, allowedReasons) ||
+          (selection === "quality-summary" &&
+            type === "pull_request" &&
+            qualitySummaryOnlyReasons.has(reason))) &&
         (!allowedCloseReasons || allowedCloseReasons.has(reason));
       const selectablePromotion =
         decision === "keep_open" &&
@@ -1079,7 +1081,7 @@ function selectedProposedItemCandidates(
 export function proposedItemQualitySummary(
   options: ProposedItemOptions,
 ): ProposedItemQualitySummary {
-  const candidates = selectedProposedItemCandidates(options, "all");
+  const candidates = selectedProposedItemCandidates(options, "quality-summary");
   const counts = new Map<ProposedItemQualityBucket, number>();
   for (const candidate of candidates) {
     counts.set(candidate.qualityBucket, (counts.get(candidate.qualityBucket) || 0) + 1);

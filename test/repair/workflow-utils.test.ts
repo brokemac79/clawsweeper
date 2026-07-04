@@ -1216,7 +1216,19 @@ test("workflow utilities summarize proposed close candidate quality buckets", ()
     }),
   );
 
+  const selected = withCwd(root, () =>
+    proposedItemNumbers({
+      targetRepo: "openclaw/openclaw",
+      applyKind: "all",
+      applyCloseReasons: "all",
+      staleMinAgeDays: 60,
+      minAgeDays: 0,
+      minAgeMinutes: null,
+    }),
+  );
+
   assert.equal(summary.total, 8);
+  assert.deepEqual(selected, [5, 6, 7, 8, 9, 10]);
   assert.equal(
     summary.summary,
     "1 implemented-on-main, 1 duplicate/superseded, 1 needs PR close proof, 3 aging/low-signal, 1 policy-sensitive, 1 retry after guard skip",

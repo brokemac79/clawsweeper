@@ -170,7 +170,12 @@ test("apply workflow bounds checkpoints and requeues with a fresh token", () => 
   assert.match(applyStep, /--state "Apply idle"/);
   assert.match(applyStep, /proposed-item-quality-summary/);
   assert.match(applyStep, /candidate_quality_summary="\$\(awk -F=/);
-  assert.match(applyStep, /Close candidate mix: \$candidate_quality_summary/);
+  assert.match(
+    applyStep,
+    /candidate_quality_detail=" Close candidate mix: \$candidate_quality_summary\."/,
+  );
+  assert.match(applyStep, /awaiting apply\.\$candidate_quality_detail Scheduled apply/);
+  assert.match(applyStep, /\$apply_close_reasons\.\$candidate_quality_detail Existing Codex/);
   const applyReconcileIndex = applyStep.indexOf('pnpm run reconcile -- "${reconcile_args[@]}"');
   const qualitySummaryIndex = applyStep.indexOf("proposed-item-quality-summary");
   const proposedNumbersIndex = applyStep.indexOf("proposed-item-numbers");
