@@ -162,6 +162,78 @@ if (args[0] === "api" && /\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
   }
 });
 
+test("apply-decisions records closed decision packet state during comment-only sync", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const itemsDir = join(root, "items");
+    const closedDir = join(root, "closed");
+    const plansDir = join(root, "plans");
+    const reportPath = join(root, "apply-report.json");
+    const packetPath = join(root, "decision-packets", "321.json");
+    mkdirSync(itemsDir, { recursive: true });
+    mkdirSync(plansDir, { recursive: true });
+    writeFileSync(
+      join(itemsDir, "321.md"),
+      implementedCloseReport({
+        action_taken: "skipped_open_closing_pr",
+        close_reason: "duplicate_or_superseded",
+        labels: JSON.stringify(["clawsweeper:needs-product-decision"]),
+        maintainer_decision: JSON.stringify(maintainerDecision),
+      }),
+      "utf8",
+    );
+
+    const ghMock = `
+const path = process.argv[3] || "";
+if (/\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
+  console.log(JSON.stringify([[]]));
+} else if (/\\/issues\\/321$/.test(path)) {
+  console.log(JSON.stringify({
+    number: 321,
+    title: "Render work plans",
+    html_url: "https://github.com/openclaw/clawsweeper/issues/321",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-02T00:00:00Z",
+    closed_at: "2026-05-02T00:00:00Z",
+    state: "closed",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: ["clawsweeper:needs-product-decision"],
+    comments: 0,
+    pull_request: null
+  }));
+} else {
+  console.error("unexpected gh args", JSON.stringify(process.argv.slice(2)));
+  process.exit(1);
+}
+`;
+    withMockGh(root, ghMock, () => {
+      runApplyDecisionsForTest({
+        itemsDir,
+        closedDir,
+        plansDir,
+        reportPath,
+        extraArgs: ["--sync-comments-only", "--comment-sync-min-age-days", "0"],
+      });
+    });
+
+    assert.equal(existsSync(join(itemsDir, "321.md")), true);
+    assert.equal(existsSync(join(closedDir, "321.md")), false);
+    assert.equal(JSON.parse(readFileSync(packetPath, "utf8")).subject.state, "closed");
+    assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), [
+      {
+        number: 321,
+        action: "skipped_already_closed",
+        reason: "state is closed",
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apply-decisions writes decision packets for changed-since-review reports", () => {
   const root = mkdtempSync(tmpPrefix);
   try {

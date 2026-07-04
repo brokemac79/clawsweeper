@@ -18017,9 +18017,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       });
       renameSync(path, closedPath);
     };
-    const markApplyChecked = (): void => {
+    const markApplyChecked = (subjectState: DecisionPacketSubjectState = "open"): void => {
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
-      if (!dryRun) writeReportMarkdown(path, markdown);
+      if (!dryRun) writeReportMarkdown(path, markdown, subjectState);
     };
     const recordApplySkipped = (actionTaken: ActionTaken, reason: string): boolean => {
       markApplyChecked();
@@ -18071,7 +18071,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       // inaccessible. Confirm repo access before treating this as an item miss.
       ghJson<unknown>(["api", `repos/${targetRepo()}`]);
       if (syncCommentsOnly) {
-        markApplyChecked();
+        markApplyChecked("closed");
         results.push({
           number,
           action: "skipped_already_closed",
@@ -18349,7 +18349,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       return result;
     };
     if (syncCommentsOnly && state !== "open") {
-      markApplyChecked();
+      markApplyChecked("closed");
       results.push({ number, action: "skipped_already_closed", reason: `state is ${state}` });
       processedCount += 1;
       maybeLogProgress(`skipped comment sync #${number}: already ${state}`);
