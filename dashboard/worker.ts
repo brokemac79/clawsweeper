@@ -5191,9 +5191,14 @@ function dashboardThemeControlScript() {
     } catch {}
     applyTheme();
   }));
-  themeQuery?.addEventListener("change", () => {
+  const updateSystemTheme = () => {
     if (themeChoice === "system") applyTheme();
-  });
+  };
+  if (typeof themeQuery?.addEventListener === "function") {
+    themeQuery.addEventListener("change", updateSystemTheme);
+  } else {
+    themeQuery?.addListener?.(updateSystemTheme);
+  }
   applyTheme();
 })();`;
 }

@@ -946,7 +946,9 @@ test("dashboard HTML emits early persistent theme controls", async () => {
     assert.match(html, /data-theme-choice="light"/);
     assert.match(html, /data-theme-choice="dark"/);
     assert.match(html, /window\.localStorage\?\.setItem\(themeKey, choice\)/);
-    assert.match(html, /themeQuery\?\.addEventListener\("change"/);
+    assert.match(html, /typeof themeQuery\?\.addEventListener === "function"/);
+    assert.match(html, /themeQuery\.addEventListener\("change", updateSystemTheme\)/);
+    assert.match(html, /themeQuery\?\.addListener\?\.\(updateSystemTheme\)/);
     assert.match(html, /setAttribute\("aria-pressed", selected \? "true" : "false"\)/);
   }
 });
