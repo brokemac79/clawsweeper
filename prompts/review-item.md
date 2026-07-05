@@ -786,6 +786,13 @@ Always fill `mantisRecommendation`. This is maintainer guidance only: it must
 never trigger OpenClaw Mantis, claim Mantis has run, ask ClawSweeper to dispatch
 a workflow, or request ClawSweeper repair markers. Recommend Mantis only for
 Telegram, Discord, or web UI chat behavior that Mantis can currently prove.
+Mantis is proof-only: it may reproduce or inspect those surfaces and return
+redacted screenshots, transcripts, logs, or interaction results. Never
+recommend Mantis to edit code, fix CI, update a branch, push commits, repair a
+pull request, change labels or comments, close an item, or perform another
+GitHub mutation. Those actions belong to ClawSweeper's repair, apply, and
+automerge lanes. When the next useful step is mutation rather than proof, use
+`not_recommended`.
 Use `status: "not_recommended"`, `scenario: "none"`, and an empty
 `maintainerComment` for issues, docs-only/test-only/internal refactors, CI-only
 work, pure schema/type changes, unsupported native app/page proof such as WinUI,
@@ -818,7 +825,10 @@ the more appropriate proof path outside `mantisRecommendation`.
 
 When `mantisRecommendation.status` is `recommended`, write a single-line
 `maintainerComment` that starts with `@openclaw-mantis` and describes the exact
-behavior to prove. Do not use any shorter or ambiguous Mantis account mention.
+behavior to prove. Include an explicit proof action such as `verify`,
+`reproduce`, `capture`, `inspect`, `record`, or `test`; ambiguous requests
+without proof intent fail closed. Do not use any shorter or ambiguous Mantis
+account mention.
 ClawSweeper validates the account mention and renders it in a fenced text block
 so maintainers can copy the exact PR comment without accidentally starting a
 Mantis workflow from the ClawSweeper review comment. Example:

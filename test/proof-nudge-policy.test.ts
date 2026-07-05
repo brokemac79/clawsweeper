@@ -206,6 +206,20 @@ test("bot proof handling selects maintainer or Mantis proof path for ClawSweeper
   assert.equal(webUiChat.eligible, true);
   assert.equal(webUiChat.action, "bot_proof_mantis_request_planned");
 
+  const webUiChatCodeBlock = botProofEligibilityForTest({
+    ...baseOptions,
+    markdown: proofNudgeReport({
+      author: "app/clawsweeper",
+      mantisStatus: "recommended",
+      mantisScenario: "web_ui_chat_proof",
+      mantisReason: "A web UI chat proof would show the changed transcript behavior.",
+      mantisComment:
+        "@openclaw-mantis web UI chat proof: verify the assistant can post a code block in the chat transcript",
+    }),
+  });
+  assert.equal(webUiChatCodeBlock.eligible, true);
+  assert.equal(webUiChatCodeBlock.action, "bot_proof_mantis_request_planned");
+
   const manualVisual = botProofEligibilityForTest({
     ...baseOptions,
     markdown: proofNudgeReport({
@@ -231,6 +245,38 @@ test("bot proof handling selects maintainer or Mantis proof path for ClawSweeper
   });
   assert.equal(invalidMantisCommand.eligible, true);
   assert.equal(invalidMantisCommand.action, "bot_proof_decision_planned");
+
+  const mutationMantisCommand = botProofEligibilityForTest({
+    ...baseOptions,
+    markdown: proofNudgeReport({
+      author: "app/clawsweeper",
+      mantisStatus: "recommended",
+      mantisScenario: "telegram_desktop_proof",
+      mantisReason: "The Telegram behavior still needs live proof and a branch repair.",
+      mantisComment: "@openclaw-mantis fix this PR and push the repaired branch",
+    }),
+  });
+  assert.equal(mutationMantisCommand.eligible, true);
+  assert.equal(mutationMantisCommand.action, "bot_proof_decision_planned");
+
+  for (const maintainerComment of [
+    "@openclaw-mantis verify the Telegram behavior and mark this PR ready for review",
+    "@openclaw-mantis verify the Telegram behavior and enable automerge",
+    "@openclaw-mantis verify the Telegram behavior and request a review from maintainers",
+  ]) {
+    const prStateMutation = botProofEligibilityForTest({
+      ...baseOptions,
+      markdown: proofNudgeReport({
+        author: "app/clawsweeper",
+        mantisStatus: "recommended",
+        mantisScenario: "telegram_desktop_proof",
+        mantisReason: "The Telegram behavior needs live proof.",
+        mantisComment: maintainerComment,
+      }),
+    });
+    assert.equal(prStateMutation.eligible, true);
+    assert.equal(prStateMutation.action, "bot_proof_decision_planned");
+  }
 
   assert.equal(
     botProofEligibilityForTest({
@@ -314,6 +360,26 @@ test("bot proof status comment asks maintainers without contributor nudge copy",
   assert.match(comment, /<!-- clawsweeper-bot-proof-decision item="42" sha="abc123def456"/);
   assert.doesNotMatch(comment, /thanks for the PR/);
   assert.doesNotMatch(comment, /Once proof is added/);
+});
+
+test("bot proof status routes mutation-oriented Mantis commands to ClawSweeper", () => {
+  const markdown = proofNudgeReport({
+    author: "app/clawsweeper",
+    mantisStatus: "recommended",
+    mantisScenario: "telegram_desktop_proof",
+    mantisReason: "The Telegram behavior still needs live proof and a branch repair.",
+    mantisComment: "@openclaw-mantis fix this PR and push the repaired branch",
+  });
+  const comment = renderBotProofDecisionCommentForTest({
+    number: 42,
+    headSha: "abc123def456",
+    markdown,
+  });
+
+  assert.match(comment, /Proof path suggestion/);
+  assert.match(comment, /Mantis is proof-only/);
+  assert.match(comment, /ClawSweeper's repair, apply, or automerge lanes/);
+  assert.doesNotMatch(comment, /@openclaw-mantis fix this PR/);
 });
 
 test("proof nudge candidate scan defers proof-label checks to live PR state", () => {
