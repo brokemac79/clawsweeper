@@ -356,11 +356,15 @@ Full review comments:
 `;
     const synced = reportWithSyncedReviewComment(sourceReport, 74481);
     writeFileSync(itemPath, synced.report, "utf8");
+    const newerStaleHeadComment = synced.comment.replace(
+      /\breviewed_at=[^\s>]+/,
+      "reviewed_at=2026-05-20T00:00:00.000Z",
+    );
 
     const ghMock = `
 const { appendFileSync, readFileSync } = require("fs");
 const logPath = ${JSON.stringify(logPath)};
-const comment = ${JSON.stringify(synced.comment)};
+const comment = ${JSON.stringify(newerStaleHeadComment)};
 const rawArgs = process.argv.slice(2);
 const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
 appendFileSync(logPath, JSON.stringify(args) + "\\n");
@@ -461,7 +465,7 @@ if (args[0] === "api" && /\\/issues\\/74481$/.test(path)) {
     assert.match(patchedBody, /clawsweeper-review-history v=1 total=1/);
     assert.match(
       patchedBody,
-      /- reviewed 2026-05-19T20:00:00Z sha old-head :: needs maintainer review before merge\./,
+      /- reviewed 2026-05-20T00:00:00\.000Z sha old-head :: needs maintainer review before merge\./,
     );
     assert.doesNotMatch(patchedBody, /clawsweeper-verdict:/);
     const updatedReport = readFileSync(itemPath, "utf8");
