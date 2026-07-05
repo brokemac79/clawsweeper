@@ -18492,7 +18492,7 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       existingReviewComment,
       number,
     );
-    if (state === "open" && isCloseProposal && staleReviewCommentReason) {
+    if (state === "open" && staleReviewCommentReason) {
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
       if (!dryRun) writeReportMarkdown(path, markdown);
       results.push({
