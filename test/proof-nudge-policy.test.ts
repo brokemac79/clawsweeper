@@ -192,6 +192,20 @@ test("bot proof handling selects maintainer or Mantis proof path for ClawSweeper
   assert.equal(mantis.eligible, true);
   assert.equal(mantis.action, "bot_proof_mantis_request_planned");
 
+  const webUiChat = botProofEligibilityForTest({
+    ...baseOptions,
+    markdown: proofNudgeReport({
+      author: "app/clawsweeper",
+      mantisStatus: "recommended",
+      mantisScenario: "web_ui_chat_proof",
+      mantisReason: "A web UI chat proof would show the changed transcript behavior.",
+      mantisComment:
+        "@openclaw-mantis web UI chat proof: verify the active chat transcript behavior",
+    }),
+  });
+  assert.equal(webUiChat.eligible, true);
+  assert.equal(webUiChat.action, "bot_proof_mantis_request_planned");
+
   const manualVisual = botProofEligibilityForTest({
     ...baseOptions,
     markdown: proofNudgeReport({
@@ -204,6 +218,19 @@ test("bot proof handling selects maintainer or Mantis proof path for ClawSweeper
   });
   assert.equal(manualVisual.eligible, true);
   assert.equal(manualVisual.action, "bot_proof_decision_planned");
+
+  const invalidMantisCommand = botProofEligibilityForTest({
+    ...baseOptions,
+    markdown: proofNudgeReport({
+      author: "app/clawsweeper",
+      mantisStatus: "recommended",
+      mantisScenario: "telegram_desktop_proof",
+      mantisReason: "Native Telegram Desktop proof would show the visible topic behavior.",
+      mantisComment: "@mantis telegram desktop proof: verify the topic behavior",
+    }),
+  });
+  assert.equal(invalidMantisCommand.eligible, true);
+  assert.equal(invalidMantisCommand.action, "bot_proof_decision_planned");
 
   assert.equal(
     botProofEligibilityForTest({
@@ -279,8 +306,11 @@ test("bot proof status comment asks maintainers without contributor nudge copy",
 
   assert.match(comment, /ClawSweeper-authored replacement PR is blocked on real behavior proof/);
   assert.match(comment, /proof: override/);
-  assert.match(comment, /Possible manual Mantis\/desktop proof suggestion/);
-  assert.match(comment, /@openclaw-mantis capture Control UI proof/);
+  assert.match(comment, /Proof path suggestion/);
+  assert.match(comment, /Mantis is currently scoped to Telegram, Discord, and web UI chat proof/);
+  assert.match(comment, /browser or Playwright proof/);
+  assert.doesNotMatch(comment, /Possible manual Mantis\/desktop proof suggestion/);
+  assert.doesNotMatch(comment, /@openclaw-mantis capture Control UI proof/);
   assert.match(comment, /<!-- clawsweeper-bot-proof-decision item="42" sha="abc123def456"/);
   assert.doesNotMatch(comment, /thanks for the PR/);
   assert.doesNotMatch(comment, /Once proof is added/);

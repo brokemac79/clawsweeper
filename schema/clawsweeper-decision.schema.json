@@ -774,7 +774,7 @@
     "mantisRecommendation": {
       "type": "object",
       "additionalProperties": false,
-      "description": "For PRs, recommend a copy-paste maintainer comment for OpenClaw Mantis only when live transport or visual proof would materially help review. Do not claim Mantis has run and do not dispatch any workflow.",
+      "description": "For PRs, recommend a copy-paste maintainer comment for OpenClaw Mantis only when Telegram, Discord, or web UI chat proof would materially help review. Do not claim Mantis has run and do not dispatch any workflow.",
       "required": ["status", "scenario", "reason", "maintainerComment"],
       "properties": {
         "status": {
@@ -789,13 +789,12 @@
             "telegram_desktop_proof",
             "discord_status_reactions",
             "discord_thread_attachment",
-            "slack_desktop_smoke",
-            "visual_task"
+            "web_ui_chat_proof"
           ]
         },
         "reason": {
           "type": "string",
-          "description": "One concise sentence explaining why this Mantis lane would or would not add useful maintainer proof."
+          "description": "One concise sentence explaining why this supported Mantis lane would or would not add useful maintainer proof. For unsupported proof surfaces such as WinUI, generic browser pages, screenshots, local artifacts, or terminal-only behavior, explain the better non-Mantis proof path while using not_recommended."
         },
         "maintainerComment": {
           "type": "string",

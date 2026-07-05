@@ -368,6 +368,12 @@ test("review prompt classifies Telegram visible proof candidates", () => {
   assert.match(prompt, /mantisRecommendation/);
   assert.match(prompt, /@openclaw-mantis/);
   assert.match(prompt, /ambiguous Mantis account mention/);
+  assert.match(prompt, /Telegram,\s+Discord,\s+or web UI chat behavior/);
+  assert.match(prompt, /web_ui_chat_proof/);
+  assert.match(prompt, /WinUI/);
+  assert.match(prompt, /browser\/Playwright proof/);
+  assert.doesNotMatch(prompt, /`visual_task`: generic visible browser\/desktop proof/);
+  assert.doesNotMatch(prompt, /`slack_desktop_smoke`/);
 });
 
 test("pull request review comments suggest copy-paste Mantis proof comments", () => {
@@ -429,6 +435,137 @@ Reason: Maintainers should review the proof before merge.
   assert.match(comment, /```text\n@openclaw-mantis telegram desktop proof:/);
 });
 
+test("pull request review comments keep Discord and web UI chat Mantis suggestions", () => {
+  const discordComment = renderReviewCommentFromReport(
+    `${reportFrontMatter({
+      type: "pull_request",
+      number: "83140",
+      decision: "keep_open",
+      close_reason: "none",
+      work_candidate: "none",
+      pull_head_sha: "abc123def456",
+    })}
+
+## Summary
+
+Keep this Discord PR open for maintainer review.
+
+## Mantis Recommendation
+
+Status: recommended
+
+Scenario: discord_status_reactions
+
+Reason: This changes visible Discord status reactions.
+
+Maintainer comment: @openclaw-mantis discord status reactions proof: verify queued and done reactions update around the worker run.
+
+## Work Candidate
+
+Candidate: none
+
+Confidence: low
+
+Priority: low
+
+Status: none
+
+Reason: Maintainers should review the proof before merge.
+	`,
+    "none",
+  );
+  assert.match(discordComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(discordComment, /@openclaw-mantis discord status reactions proof:/);
+
+  const webUiChatComment = renderReviewCommentFromReport(
+    `${reportFrontMatter({
+      type: "pull_request",
+      number: "83141",
+      decision: "keep_open",
+      close_reason: "none",
+      work_candidate: "none",
+      pull_head_sha: "def456abc123",
+    })}
+
+## Summary
+
+Keep this web UI chat PR open for maintainer review.
+
+## Mantis Recommendation
+
+Status: recommended
+
+Scenario: web_ui_chat_proof
+
+Reason: This changes a visible web UI chat transcript interaction.
+
+Maintainer comment: @openclaw-mantis web UI chat proof: verify the assistant reply streams into the active chat transcript.
+
+## Work Candidate
+
+Candidate: none
+
+Confidence: low
+
+Priority: low
+
+Status: none
+
+Reason: Maintainers should review the proof before merge.
+	`,
+    "none",
+  );
+  assert.match(webUiChatComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(webUiChatComment, /@openclaw-mantis web UI chat proof:/);
+});
+
+test("pull request review comments scope unsupported Mantis visual suggestions", () => {
+  const comment = renderReviewCommentFromReport(
+    `${reportFrontMatter({
+      type: "pull_request",
+      number: "83142",
+      decision: "keep_open",
+      close_reason: "none",
+      work_candidate: "none",
+      pull_head_sha: "123abc456def",
+    })}
+
+## Summary
+
+Keep this WinUI PR open for maintainer review.
+
+## Mantis Recommendation
+
+Status: recommended
+
+Scenario: visual_task
+
+Reason: A short visible WinUI proof would materially help because this changes a Sessions page filter toggle.
+
+Maintainer comment: @openclaw-mantis visual task: verify the Sessions page hides clean completed sessions by default.
+
+## Work Candidate
+
+Candidate: none
+
+Confidence: low
+
+Priority: low
+
+Status: none
+
+Reason: Maintainers should review the proof before merge.
+	`,
+    "none",
+  );
+
+  assert.doesNotMatch(comment, /\*\*Mantis proof suggestion\*\*/);
+  assert.doesNotMatch(comment, /@openclaw-mantis visual task/);
+  assert.match(comment, /\*\*Proof path suggestion\*\*/);
+  assert.match(comment, /Mantis is currently scoped to Telegram, Discord, and web UI chat proof/);
+  assert.match(comment, /browser or Playwright proof/);
+});
+
 test("pull request review comments suppress unsafe Mantis recommendations", () => {
   const comment = renderReviewCommentFromReport(
     `${reportFrontMatter({
@@ -470,6 +607,7 @@ Reason: Maintainers should review the proof before merge.
   );
 
   assert.doesNotMatch(comment, /\*\*Mantis proof suggestion\*\*/);
+  assert.doesNotMatch(comment, /\*\*Proof path suggestion\*\*/);
   assert.doesNotMatch(comment, /@openclaw-mantis/);
 });
 
