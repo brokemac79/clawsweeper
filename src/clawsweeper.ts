@@ -18496,12 +18496,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
     if (existingReviewCommentUpdatedAt) {
       allowedSelfMutationUpdatedAts.add(existingReviewCommentUpdatedAt);
     }
-    const staleReviewCommentReason = staleReviewCommentSyncReason(
-      markdown,
-      existingReviewComment,
-      number,
-      currentItemContext(),
-    );
+    const staleReviewCommentReason =
+      item.kind === "pull_request"
+        ? staleReviewCommentSyncReason(
+            markdown,
+            existingReviewComment,
+            number,
+            currentItemContext(),
+          )
+        : null;
     if (state === "open" && staleReviewCommentReason) {
       markdown = replaceFrontMatterValue(markdown, "apply_checked_at", new Date().toISOString());
       if (!dryRun) writeReportMarkdown(path, markdown);
