@@ -11,6 +11,15 @@ live populated shoreline, master-sweeper movement between lanes, terminal
 pools, and the contextual crustacean chat behavior. The recording is a
 1280×720 H.264 review artifact with audio and capture metadata removed.
 
+For independently inspectable interaction proof, see the
+[labelled Playwright storyboard](proof/openclaw-bay/playwright-proof-storyboard.jpg),
+[compact trace](proof/openclaw-bay/trace.zip), and
+[machine-readable assertion summary](proof/openclaw-bay/proof-summary.json).
+That deterministic run uses the real page and artwork with a fully synthetic,
+redacted status sequence; it covers the forward sweep, retrigger tunnel,
+search, repository filter, safe drawer links, local-only tide, and visible
+network diagnostics without reading live dashboard data.
+
 The demo is intentionally absent from the Overview, issue-triage, and PR-proof
 navigation. `X-Robots-Tag` and page metadata ask crawlers not to index it, but
 that is not access control: anyone who has or guesses the URL can open it. A
