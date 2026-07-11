@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from "node:url";
+
 const cliUrl = process.argv.find((arg, index) => index > 1 && arg !== "--");
 const baseUrl = cliUrl || process.env.CLAWSWEEPER_STATUS_URL || "http://127.0.0.1:8787";
 
@@ -79,7 +81,7 @@ async function main() {
   if (!bayHtml.includes('fetch("/api/status"')) {
     throw new Error("Bay demo does not use the shared status endpoint");
   }
-  if (bayHtml.includes("api.github.com")) {
+  if (containsDirectGitHubApiUrl(bayHtml)) {
     throw new Error("Bay demo contains a direct browser-to-GitHub request");
   }
 
@@ -139,7 +141,13 @@ async function fetchText(url) {
   return response.text();
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+export function containsDirectGitHubApiUrl(html) {
+  return /(?:^|[^a-z0-9.-])api\.github\.com\.?(?=$|[^a-z0-9.-])/iu.test(html);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
