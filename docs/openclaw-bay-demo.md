@@ -6,6 +6,11 @@ and turns active work into animated crustaceans moving across a shoreline.
 
 ![OpenClaw Bay running against the shared dashboard status feed](openclaw-bay-demo.jpg)
 
+[Watch the 32-second browser recording](openclaw-bay-demo.mp4). It shows the
+live populated shoreline, master-sweeper movement between lanes, terminal
+pools, and the contextual crustacean chat behavior. The recording is a
+1280×720 H.264 review artifact with audio and capture metadata removed.
+
 The demo is intentionally absent from the Overview, issue-triage, and PR-proof
 navigation. `X-Robots-Tag` and page metadata ask crawlers not to index it, but
 that is not access control: anyone who has or guesses the URL can open it. A
