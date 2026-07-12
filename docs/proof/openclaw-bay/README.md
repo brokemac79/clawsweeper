@@ -16,7 +16,7 @@ The sequence proves:
 - the read-only drawer's safe GitHub item, job, and workflow-run links;
 - the local-only tide preview advancing through incoming, crest, backwash, and restored states while preserving terminal keys and count;
 - the short static reduced-motion tide cue preserving the same preview state;
-- nine completed outcomes fitting individually in the expanded terminal pool without a hidden overflow, including a two-column narrow-width layout with no reference-label intersections; and
+- nine completed outcomes fitting individually in the expanded terminal pool without a hidden overflow, including a two-column constrained-width layout with no reference-label intersections; and
 - a generated real tide visibly washing terminal crustaceans before clearing the shared buffer; and
 - zero browser-to-GitHub API requests, mutation requests, console errors, or
   uncaught page errors.
@@ -63,9 +63,9 @@ crabbox run \
 
 ## Provenance and privacy
 
-- implementation source: `8f7a6544492fa28d29aec3f8f8e98d1bc7ee14dd`
+- implementation source: `2d5793c1a0e1b39fd174c3d743118845152eaab6`
 - provider: Crabbox `local-container`
-- lease: `cbx_f6ede4a47f71` (`violet-crayfish`)
+- lease: `cbx_320bf6be31c9` (`blue-lobster`)
 - image: `mcr.microsoft.com/playwright:v1.60.0-noble`
 - fixture SHA-256:
   `FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21`
