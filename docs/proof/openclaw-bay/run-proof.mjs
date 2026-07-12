@@ -741,7 +741,7 @@ try {
     denseCompletedCount === denseTerminalBuffer.length && denseOverflowCount === 0,
     { completed: denseCompletedCount, overflow_notes: denseOverflowCount },
   );
-  await page.setViewportSize({ width: 1000, height: 1000 });
+  await page.setViewportSize({ width: 1400, height: 1000 });
   await page.waitForFunction(
     () => document.querySelector('[data-stage="completed"]')?.getAttribute("data-cols") === "2",
     null,
@@ -770,7 +770,7 @@ try {
       };
     });
   assertProof(
-    "dense terminal pool keeps references readable at narrow width",
+    "dense terminal pool keeps references readable at constrained width",
     narrowTerminalPool.references === denseTerminalBuffer.length &&
       narrowTerminalPool.columns === "2" &&
       !narrowTerminalPool.overlaps,

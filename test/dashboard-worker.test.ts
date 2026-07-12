@@ -103,7 +103,7 @@ test("OpenClaw Bay is an unlisted, hardened demo route", async () => {
   assert.match(body, /gridTemplateColumns=laneWeights/);
   assert.match(body, /function fitStageDensity/);
   assert.match(body, /function terminalColumns\(count\)/);
-  assert.match(body, /count>6&&window\.innerWidth>1100\?3:2/);
+  assert.match(body, /terminalStack\.clientWidth>=320\?3:2/);
   assert.match(body, /function terminalSlots\(columns\)/);
   assert.match(body, /more in the tide buffer/);
   assert.match(body, /lane-nudge/);
