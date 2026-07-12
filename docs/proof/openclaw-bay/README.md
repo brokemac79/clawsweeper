@@ -47,10 +47,12 @@ the independently inspectable DOM, action, and network record.
 From the repository root, reproduce the proof with the known Playwright image:
 
 ```bash
+BAY_PROOF_SOURCE_SHA="$(git rev-parse HEAD)" \
 crabbox run \
   --provider local-container \
   --local-container-image mcr.microsoft.com/playwright:v1.60.0-noble \
   --no-hydrate \
+  --allow-env BAY_PROOF_SOURCE_SHA \
   --timing-json \
   --script docs/proof/openclaw-bay/run-proof.sh \
   --require-artifact '.artifacts/openclaw-bay-proof/trace.zip' \
@@ -59,9 +61,9 @@ crabbox run \
 
 ## Provenance and privacy
 
-- implementation source: `92f4ecceddabdcd4b72aae1cab5de64b280d7761` plus the reviewed local tide patch
+- implementation source: `09941a121d0911278a64f71f3bbd7d57fa090dc8`
 - provider: Crabbox `local-container`
-- lease: `cbx_bf388662693f` (`brisk-lobster`)
+- lease: `cbx_58b0a8f78e74` (`harbor-lobster`)
 - image: `mcr.microsoft.com/playwright:v1.60.0-noble`
 - fixture SHA-256:
   `FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21`

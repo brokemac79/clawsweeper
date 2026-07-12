@@ -43,7 +43,7 @@ curl --fail --silent --show-error "http://127.0.0.1:${port}/bay-demo" >/dev/null
 
 export PLAYWRIGHT_MODULE="file://${deps_dir}/node_modules/playwright/index.mjs"
 export PLAYWRIGHT_CHROMIUM_EXECUTABLE="/ms-playwright/chromium-1223/chrome-linux64/chrome"
-export SOURCE_SHA="$(git rev-parse HEAD)"
+export SOURCE_SHA="${BAY_PROOF_SOURCE_SHA:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
 export BAY_PROOF_OUTPUT="$output_dir"
 export BAY_PROOF_PORT="$port"
 

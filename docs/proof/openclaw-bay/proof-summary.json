@@ -1,6 +1,6 @@
 {
   "proof": "OpenClaw Bay deterministic Playwright browser proof",
-  "source_sha": "92f4ecceddabdcd4b72aae1cab5de64b280d7761",
+  "source_sha": "09941a121d0911278a64f71f3bbd7d57fa090dc8",
   "route": "/bay-demo",
   "data_classification": "fully synthetic and redacted; no live/private dashboard payloads",
   "fixture_sha256": "FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21",
@@ -19,7 +19,7 @@
     }
   ],
   "derived_real_tide_snapshot_sha256": "CB7BD99B2ABEA3B24F7416193C97BC7DE5F950CD1A29963B003111C03920576E",
-  "generated_at": "2026-07-12T11:13:03.377Z",
+  "generated_at": "2026-07-12T11:29:47.345Z",
   "assertions": [
     {
       "name": "real Bay route loaded",
@@ -46,7 +46,7 @@
     {
       "name": "crustacean claw animation advances",
       "status": "PASS",
-      "elapsed_animation_ms": 300
+      "elapsed_animation_ms": 283
     },
     {
       "name": "forward transition raises READY flag",
@@ -56,7 +56,7 @@
       "name": "master sweeper animation advances",
       "status": "PASS",
       "phase": "sweeping",
-      "elapsed_animation_ms": 283
+      "elapsed_animation_ms": 300
     },
     {
       "name": "forward transition lands in reported lane",
@@ -68,7 +68,7 @@
       "status": "PASS",
       "source_hole": 1,
       "target_hole": 1,
-      "target_hole_opacity": 0.392068,
+      "target_hole_opacity": 0.392261,
       "label": "openclaw/openclaw#97722 burrowing"
     },
     {
@@ -135,7 +135,7 @@
       "status": "PASS",
       "duration": "520ms",
       "animation_name": "none",
-      "elapsed_ms": 570
+      "elapsed_ms": 573
     },
     {
       "name": "tide previews do not poll status",
