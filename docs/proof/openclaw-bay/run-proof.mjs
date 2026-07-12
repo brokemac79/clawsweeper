@@ -741,6 +741,47 @@ try {
     denseCompletedCount === denseTerminalBuffer.length && denseOverflowCount === 0,
     { completed: denseCompletedCount, overflow_notes: denseOverflowCount },
   );
+  await page.setViewportSize({ width: 1000, height: 1000 });
+  await page.waitForFunction(
+    () => document.querySelector('[data-stage="completed"]')?.getAttribute("data-cols") === "2",
+    null,
+    { timeout: 3_000 },
+  );
+  await page.waitForTimeout(1_000);
+  const narrowTerminalPool = await page
+    .locator('[data-stage="completed"] .ref')
+    .evaluateAll((nodes) => {
+      const references = nodes.map((node) => node.getBoundingClientRect());
+      const overlaps = references.some((reference, index) =>
+        references
+          .slice(index + 1)
+          .some(
+            (other) =>
+              reference.left < other.right &&
+              reference.right > other.left &&
+              reference.top < other.bottom &&
+              reference.bottom > other.top,
+          ),
+      );
+      return {
+        references: references.length,
+        overlaps,
+        columns: document.querySelector('[data-stage="completed"]')?.getAttribute("data-cols"),
+      };
+    });
+  assertProof(
+    "dense terminal pool keeps references readable at narrow width",
+    narrowTerminalPool.references === denseTerminalBuffer.length &&
+      narrowTerminalPool.columns === "2" &&
+      !narrowTerminalPool.overlaps,
+    narrowTerminalPool,
+  );
+  await page.setViewportSize({ width: 1900, height: 1000 });
+  await page.waitForFunction(
+    () => document.querySelector('[data-stage="completed"]')?.getAttribute("data-cols") === "3",
+    null,
+    { timeout: 3_000 },
+  );
   await capture(
     "15-dense-terminal-pool",
     "Dense completed pool uses the available shoreline",
