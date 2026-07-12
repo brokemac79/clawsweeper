@@ -101,6 +101,12 @@ test("OpenClaw Bay is an unlisted, hardened demo route", async () => {
   assert.match(body, /function showLaneChat/);
   assert.match(body, /z-index:90/);
   assert.match(body, /id="tide-preview"/);
+  assert.match(body, /id="tide-visual"/);
+  assert.match(body, /class="tide-carriage wave"/);
+  assert.match(body, /tide-water-texture/);
+  assert.match(body, /tide-washing/);
+  assert.match(body, /dataset\.tidePhase="incoming"/);
+  assert.match(body, /duration:"520ms"|end:520/);
   assert.match(body, /function previewTide/);
   assert.match(body, /live outcome data was unchanged/);
   assert.match(body, /realTidePending/);

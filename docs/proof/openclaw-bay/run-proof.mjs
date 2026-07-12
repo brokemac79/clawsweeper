@@ -6,9 +6,7 @@ import { pathToFileURL } from "node:url";
 const playwrightModule = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(playwrightModule);
 
-const outputDir = path.resolve(
-  process.env.BAY_PROOF_OUTPUT || ".artifacts/openclaw-bay-proof",
-);
+const outputDir = path.resolve(process.env.BAY_PROOF_OUTPUT || ".artifacts/openclaw-bay-proof");
 const sourceSha = process.env.SOURCE_SHA || "unknown";
 const port = Number(process.env.BAY_PROOF_PORT || 8787);
 const origin = `http://bay-proof.test:${port}`;
@@ -154,10 +152,7 @@ function snapshot(workers) {
 
 const expectedSnapshots = [
   snapshot(baseWorkers),
-  snapshot([
-    { ...baseWorkers[0], current_step: "Validate repair" },
-    ...baseWorkers.slice(1),
-  ]),
+  snapshot([{ ...baseWorkers[0], current_step: "Validate repair" }, ...baseWorkers.slice(1)]),
   snapshot([
     {
       ...baseWorkers[0],
@@ -166,9 +161,7 @@ const expectedSnapshots = [
       run_url: "https://github.com/openclaw/openclaw/actions/runs/1002",
       job_url: "https://github.com/openclaw/openclaw/actions/runs/1002/job/2002",
       started_at: "2026-07-11T18:01:00.000Z",
-      steps: [
-        { name: "Set up job", status: "in_progress", conclusion: null },
-      ],
+      steps: [{ name: "Set up job", status: "in_progress", conclusion: null }],
     },
     ...baseWorkers.slice(1),
   ]),
@@ -182,6 +175,22 @@ const snapshots = fixtureBodies.map((body) => JSON.parse(body));
 if (JSON.stringify(snapshots) !== JSON.stringify(expectedSnapshots)) {
   throw new Error("Checked-in Bay proof fixtures no longer match the expected synthetic sequence");
 }
+const realTideSnapshot = structuredClone(snapshots[2]);
+realTideSnapshot.generated_at = "2026-07-11T18:02:00.000Z";
+realTideSnapshot.bay = {
+  ...realTideSnapshot.bay,
+  terminal_buffer: [],
+  recently_washed: terminalBuffer,
+  terminal_count: 0,
+  tide_generation: 1,
+  last_tide_at: "2026-07-11T18:02:00.000Z",
+  washed_at: "2026-07-11T18:02:00.000Z",
+};
+const proofSnapshots = [...snapshots, realTideSnapshot];
+const realTideSnapshotSha256 = createHash("sha256")
+  .update(JSON.stringify(realTideSnapshot))
+  .digest("hex")
+  .toUpperCase();
 const fixtureSnapshotSha256 = fixtureBodies.map((body, index) => ({
   file: `fixtures/${fixtureFiles[index]}`,
   sha256: createHash("sha256").update(body).digest("hex").toUpperCase(),
@@ -200,6 +209,8 @@ const assertions = [];
 const evidence = [];
 let tideBefore = [];
 let tideAfter = [];
+let reducedTideAfter = [];
+const tidePhases = [];
 let drawerLinks = [];
 
 function assertProof(name, condition, details = {}) {
@@ -259,7 +270,9 @@ await context.addInitScript(() => {
       removeListener() {},
       addEventListener() {},
       removeEventListener() {},
-      dispatchEvent() { return true; },
+      dispatchEvent() {
+        return true;
+      },
     };
   };
 });
@@ -283,7 +296,8 @@ page.on("response", (response) => {
   });
 });
 page.on("console", (message) => {
-  if (message.type() === "error") consoleErrors.push(message.text().replaceAll(outputDir, "[REDACTED]"));
+  if (message.type() === "error")
+    consoleErrors.push(message.text().replaceAll(outputDir, "[REDACTED]"));
 });
 page.on("pageerror", (error) => pageErrors.push(String(error.message || error)));
 
@@ -295,7 +309,7 @@ await page.route("**/*", async (route) => {
       status: 200,
       contentType: "application/json; charset=utf-8",
       headers: { "cache-control": "no-store", "x-clawsweeper-cache": "synthetic-proof" },
-      body: JSON.stringify(snapshots[fixtureIndex]),
+      body: JSON.stringify(proofSnapshots[fixtureIndex]),
     });
     return;
   }
@@ -309,39 +323,42 @@ await page.route("**/*", async (route) => {
 await context.tracing.start({ screenshots: false, snapshots: true, sources: false });
 
 async function setCaption(title, detail) {
-  await page.evaluate(({ title, detail }) => {
-    let node = document.getElementById("playwright-proof-caption");
-    if (!node) {
-      node = document.createElement("aside");
-      node.id = "playwright-proof-caption";
-      node.setAttribute("aria-label", "Playwright proof caption");
-      Object.assign(node.style, {
-        position: "fixed",
-        zIndex: "1000",
-        left: "50%",
-        bottom: "18px",
-        transform: "translateX(-50%)",
-        width: "min(980px, 86vw)",
-        padding: "12px 18px",
-        border: "2px solid rgba(255,255,255,.78)",
-        borderRadius: "14px",
-        background: "rgba(23,67,70,.94)",
-        boxShadow: "0 12px 30px rgba(24,44,42,.28)",
-        color: "white",
-        font: "700 15px/1.35 system-ui,sans-serif",
-        pointerEvents: "none",
-        textAlign: "center",
-      });
-      document.body.append(node);
-    }
-    node.replaceChildren();
-    const strong = document.createElement("strong");
-    strong.textContent = title;
-    strong.style.color = "#ffd092";
-    const span = document.createElement("span");
-    span.textContent = ` — ${detail}`;
-    node.append(strong, span);
-  }, { title, detail });
+  await page.evaluate(
+    ({ title, detail }) => {
+      let node = document.getElementById("playwright-proof-caption");
+      if (!node) {
+        node = document.createElement("aside");
+        node.id = "playwright-proof-caption";
+        node.setAttribute("aria-label", "Playwright proof caption");
+        Object.assign(node.style, {
+          position: "fixed",
+          zIndex: "1000",
+          left: "50%",
+          bottom: "18px",
+          transform: "translateX(-50%)",
+          width: "min(980px, 86vw)",
+          padding: "12px 18px",
+          border: "2px solid rgba(255,255,255,.78)",
+          borderRadius: "14px",
+          background: "rgba(23,67,70,.94)",
+          boxShadow: "0 12px 30px rgba(24,44,42,.28)",
+          color: "white",
+          font: "700 15px/1.35 system-ui,sans-serif",
+          pointerEvents: "none",
+          textAlign: "center",
+        });
+        document.body.append(node);
+      }
+      node.replaceChildren();
+      const strong = document.createElement("strong");
+      strong.textContent = title;
+      strong.style.color = "#ffd092";
+      const span = document.createElement("span");
+      span.textContent = ` — ${detail}`;
+      node.append(strong, span);
+    },
+    { title, detail },
+  );
 }
 
 async function capture(id, title, detail) {
@@ -363,17 +380,26 @@ try {
   await page.locator("#stage-grid .critter").first().waitFor({ state: "visible" });
   await page.evaluate(() => document.fonts.ready);
 
-  assertProof("real Bay route loaded", (await page.title()).includes("OpenClaw Bay"), { route: "/bay-demo" });
-  assertProof("manual poll hook captured", await page.evaluate(() => typeof window.__bayProofPoll === "function"));
+  assertProof("real Bay route loaded", (await page.title()).includes("OpenClaw Bay"), {
+    route: "/bay-demo",
+  });
+  assertProof(
+    "manual poll hook captured",
+    await page.evaluate(() => typeof window.__bayProofPoll === "function"),
+  );
   assertProof("visible redacted diagnostics", await page.locator("#notice.show").isVisible(), {
     text: await page.locator("#notice").innerText(),
     title: await page.locator("#notice").getAttribute("title"),
   });
-  assertProof("explicit terminal pools populated", (await page.locator(".pool .critter").count()) === 3, {
-    completed: await page.locator('[data-stage="completed"] .critter').count(),
-    failed: await page.locator('[data-stage="failed"] .critter').count(),
-    cancelled: await page.locator('[data-stage="cancelled"] .critter').count(),
-  });
+  assertProof(
+    "explicit terminal pools populated",
+    (await page.locator(".pool .critter").count()) === 3,
+    {
+      completed: await page.locator('[data-stage="completed"] .critter').count(),
+      failed: await page.locator('[data-stage="failed"] .critter').count(),
+      cancelled: await page.locator('[data-stage="cancelled"] .critter').count(),
+    },
+  );
   await capture(
     "01-initial-diagnostics",
     "Synthetic, redacted status fixture",
@@ -381,9 +407,13 @@ try {
   );
 
   await page.locator('[data-brush="change"]').click();
-  await page.evaluate(() => { window.__bayProofReduceMotion = false; });
+  await page.evaluate(() => {
+    window.__bayProofReduceMotion = false;
+  });
   const claw = page.locator('[data-key="openclaw/openclaw#97722"] .sprite-claw-a');
-  const clawStart = await claw.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
+  const clawStart = await claw.evaluate((node) =>
+    Number(node.getAnimations()[0]?.currentTime || 0),
+  );
   await page.waitForTimeout(280);
   const clawEnd = await claw.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
   assertProof("crustacean claw animation advances", clawEnd > clawStart, {
@@ -391,11 +421,16 @@ try {
   });
 
   fixtureIndex = 1;
-  await page.evaluate(async () => { await window.__bayProofPoll(); });
+  await page.evaluate(async () => {
+    await window.__bayProofPoll();
+  });
   const mainItemKey = "openclaw/openclaw#97722";
   const mainKey = `[data-key="${mainItemKey}"]`;
   await page.locator(`${mainKey}.ready`).waitFor({ state: "visible", timeout: 5_000 });
-  assertProof("forward transition raises READY flag", await page.locator(`${mainKey} .ready-flag`).isVisible());
+  assertProof(
+    "forward transition raises READY flag",
+    await page.locator(`${mainKey} .ready-flag`).isVisible(),
+  );
   await capture(
     "02-ready-for-sweep",
     "Forward transition: READY",
@@ -404,9 +439,13 @@ try {
 
   await page.locator(`${mainKey}.being-swept`).waitFor({ state: "visible", timeout: 18_000 });
   const masterClaw = page.locator("#master .master-claw-a");
-  const masterStart = await masterClaw.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
+  const masterStart = await masterClaw.evaluate((node) =>
+    Number(node.getAnimations()[0]?.currentTime || 0),
+  );
   await page.waitForTimeout(280);
-  const masterEnd = await masterClaw.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
+  const masterEnd = await masterClaw.evaluate((node) =>
+    Number(node.getAnimations()[0]?.currentTime || 0),
+  );
   assertProof("master sweeper animation advances", masterEnd > masterStart, {
     phase: await page.locator("#master").getAttribute("data-phase"),
     elapsed_animation_ms: Math.round(masterEnd - masterStart),
@@ -429,19 +468,25 @@ try {
   );
 
   fixtureIndex = 2;
-  await page.evaluate(async () => { await window.__bayProofPoll(); });
+  await page.evaluate(async () => {
+    await window.__bayProofPoll();
+  });
   await page.locator(`${mainKey}.tunneling`).waitFor({ state: "visible", timeout: 5_000 });
   await page.locator("#tunnel-layer .tunnel-journey").waitFor({ state: "visible", timeout: 3_000 });
-  await page.waitForFunction(() => {
-    const target = document.querySelector(".tunnel-hole.target");
-    return target && Number.parseFloat(getComputedStyle(target).opacity) > 0.25;
-  }, null, { timeout: 4_000 });
+  await page.waitForFunction(
+    () => {
+      const target = document.querySelector(".tunnel-hole.target");
+      return target && Number.parseFloat(getComputedStyle(target).opacity) > 0.25;
+    },
+    null,
+    { timeout: 4_000 },
+  );
   const sourceHoleCount = await page.locator(".tunnel-hole.source").count();
   const targetHoleCount = await page.locator(".tunnel-hole.target").count();
   const tunnelLabel = await page.locator(".burrow-label").innerText();
-  const targetHoleOpacity = await page.locator(".tunnel-hole.target").evaluate((node) =>
-    Number.parseFloat(getComputedStyle(node).opacity),
-  );
+  const targetHoleOpacity = await page
+    .locator(".tunnel-hole.target")
+    .evaluate((node) => Number.parseFloat(getComputedStyle(node).opacity));
   assertProof(
     "retrigger uses tunnel journey",
     sourceHoleCount === 1 &&
@@ -476,9 +521,15 @@ try {
   await page.locator("#finder-input").fill("97722");
   await page.locator("#finder").evaluate((form) => form.requestSubmit());
   await page.locator(`${mainKey}.located`).waitFor({ state: "visible" });
-  assertProof("search locates GitHub reference", (await page.locator("#finder-status").innerText()) === "Found #97722", {
-    focused_number: await page.evaluate(() => document.activeElement?.getAttribute("data-number")),
-  });
+  assertProof(
+    "search locates GitHub reference",
+    (await page.locator("#finder-status").innerText()) === "Found #97722",
+    {
+      focused_number: await page.evaluate(() =>
+        document.activeElement?.getAttribute("data-number"),
+      ),
+    },
+  );
   await capture(
     "07-search-highlight",
     "Where's my crustacean?",
@@ -486,9 +537,9 @@ try {
   );
 
   await page.locator('[data-repo="openclaw/clawhub"]').click();
-  const filteredKeys = await page.locator(".critter[data-key]").evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("data-key")),
-  );
+  const filteredKeys = await page
+    .locator(".critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")));
   assertProof(
     "repository filter isolates selected repo",
     filteredKeys.length === 2 && filteredKeys.every((key) => key?.startsWith("openclaw/clawhub#")),
@@ -525,55 +576,233 @@ try {
   await page.locator("#drawer-close").click();
   await page.locator('[data-repo="all"]').click();
 
-  tideBefore = await page.locator(".pool .critter[data-key]").evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("data-key")).sort(),
-  );
+  tideBefore = await page
+    .locator(".pool .critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")).sort());
   const countdownBefore = await page.locator("#tide-countdown").innerText();
+  const statusGetsBeforeTide = requests.filter((request) => request.path === "/api/status").length;
   await page.locator("#tide-preview").click();
-  await page.locator("#beach.tide-active").waitFor({ state: "visible" });
+  await page
+    .locator('#beach.tide-active[data-tide-phase="incoming"]')
+    .waitFor({ state: "visible" });
+  tidePhases.push("incoming");
   const wave = page.locator("#beach .wave");
-  const waveStart = await wave.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
+  const waveStart = await wave.evaluate((node) =>
+    Number(node.getAnimations()[0]?.currentTime || 0),
+  );
   await page.waitForTimeout(280);
   const waveEnd = await wave.evaluate((node) => Number(node.getAnimations()[0]?.currentTime || 0));
+  const tideLayerCount = await page
+    .locator("#beach .tide-water, #beach .tide-foam-lace, #beach .tide-wet-sheen")
+    .count();
   assertProof(
-    "preview tide visibly animates",
+    "layered preview tide visibly animates",
     (await page.locator("#tide-preview").getAttribute("aria-busy")) === "true" &&
-      waveEnd > waveStart,
-    { elapsed_animation_ms: Math.round(waveEnd - waveStart) },
+      waveEnd > waveStart &&
+      tideLayerCount === 3,
+    { elapsed_animation_ms: Math.round(waveEnd - waveStart), tide_layers: tideLayerCount },
+  );
+  await page.waitForFunction(
+    () =>
+      Number(document.querySelector("#beach .wave")?.getAnimations()[0]?.currentTime || 0) >= 1800,
+    null,
+    { timeout: 3_000 },
   );
   await capture(
-    "10-preview-tide-wave",
-    "Local-only tide preview",
-    "The wave animation runs over the terminal pools without a mutation request.",
+    "10-preview-tide-incoming",
+    "Tide incoming along the shoreline",
+    "Layered translucent water, painted texture, foam, ripples, and bubbles approach the terminal pools.",
   );
-  await page.locator("#beach.preview-tide-cleared").waitFor({ state: "visible", timeout: 5_000 });
+  await page
+    .locator('#beach.preview-tide-cleared[data-tide-phase="crest"]')
+    .waitFor({ state: "visible", timeout: 5_000 });
+  tidePhases.push("crest");
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll(".pool .critter")).every(
+        (node) => Number(getComputedStyle(node).opacity) < 0.25,
+      ),
+    null,
+    { timeout: 1_800 },
+  );
   await capture(
-    "11-preview-tide-cleared",
-    "Preview visual clear",
-    "Terminal crustaceans fade only inside the temporary browser animation.",
+    "11-preview-tide-crest",
+    "Foam crest washes the terminal pools",
+    "Terminal crustaceans drift seaward only inside the temporary local preview; live outcomes remain unchanged.",
   );
-  await page.waitForFunction(() => document.getElementById("tide-preview")?.getAttribute("aria-busy") === "false", null, { timeout: 8_000 });
-  tideAfter = await page.locator(".pool .critter[data-key]").evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("data-key")).sort(),
+  await page
+    .locator('#beach[data-tide-phase="receding"]')
+    .waitFor({ state: "visible", timeout: 2_500 });
+  tidePhases.push("receding");
+  await page.locator("#beach.preview-tide-cleared").waitFor({ state: "hidden", timeout: 2_500 });
+  await capture(
+    "12-preview-tide-backwash",
+    "Backwash leaves a wet-sand sheen",
+    "The water and foam recede toward the illustrated sea while the preview crustaceans return.",
   );
+  await page.waitForFunction(
+    () => document.getElementById("tide-preview")?.getAttribute("aria-busy") === "false",
+    null,
+    { timeout: 8_000 },
+  );
+  tidePhases.push(await page.locator("#beach").getAttribute("data-tide-phase"));
+  tideAfter = await page
+    .locator(".pool .critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")).sort());
   const countdownAfter = await page.locator("#tide-countdown").innerText();
+  assertProof(
+    "preview tide follows explicit visual phases",
+    JSON.stringify(tidePhases) === JSON.stringify(["incoming", "crest", "receding", "idle"]),
+    {
+      phases: tidePhases,
+    },
+  );
+  await capture(
+    "13-preview-tide-restored",
+    "Preview returns to live state",
+    "The shoreline is restored and every terminal crustacean returns after the non-mutating preview.",
+  );
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.evaluate(() => {
+    window.__bayProofReduceMotion = true;
+  });
+  const reducedStart = await page.evaluate(() => performance.now());
+  await page.locator("#tide-preview").click();
+  await page.locator("#beach.tide-active").waitFor({ state: "visible" });
+  await page.waitForTimeout(120);
+  const reducedDuration = await page
+    .locator("#beach")
+    .evaluate((node) => node.style.getPropertyValue("--tide-duration"));
+  const reducedAnimationName = await wave.evaluate((node) => getComputedStyle(node).animationName);
+  await capture(
+    "14-preview-tide-reduced-motion",
+    "Reduced-motion tide cue",
+    "Motion-sensitive users receive a brief static shoreline wash with the same non-mutating semantics.",
+  );
+  await page.waitForFunction(
+    () => document.getElementById("tide-preview")?.getAttribute("aria-busy") === "false",
+    null,
+    { timeout: 1_500 },
+  );
+  const reducedElapsed = Math.round((await page.evaluate(() => performance.now())) - reducedStart);
+  reducedTideAfter = await page
+    .locator(".pool .critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")).sort());
+  assertProof(
+    "reduced-motion tide is brief and non-spatial",
+    reducedDuration === "520ms" &&
+      reducedAnimationName === "none" &&
+      reducedElapsed < 1_500 &&
+      JSON.stringify(reducedTideAfter) === JSON.stringify(tideBefore),
+    { duration: reducedDuration, animation_name: reducedAnimationName, elapsed_ms: reducedElapsed },
+  );
+
+  const statusGetsAfterTide = requests.filter((request) => request.path === "/api/status").length;
+  assertProof("tide previews do not poll status", statusGetsAfterTide === statusGetsBeforeTide, {
+    before_status_gets: statusGetsBeforeTide,
+    after_status_gets: statusGetsAfterTide,
+  });
+
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => {
+    window.__bayProofReduceMotion = false;
+  });
+  const activeBeforeRealTide = await page
+    .locator(".stage .critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")).sort());
+  fixtureIndex = 3;
+  await page.evaluate(async () => {
+    await window.__bayProofPoll();
+  });
+  await page
+    .locator('#beach.tide-active[data-tide-mode="real"][data-tide-phase="incoming"]')
+    .waitFor({ state: "visible", timeout: 3_000 });
+  await page
+    .locator('#beach.tide-washing[data-tide-mode="real"][data-tide-phase="crest"]')
+    .waitFor({ state: "visible", timeout: 5_000 });
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll(".pool .critter")).every(
+        (node) => Number(getComputedStyle(node).opacity) < 0.25,
+      ),
+    null,
+    { timeout: 1_800 },
+  );
+  const realWashCount = await page.locator(".pool .critter[data-key]").count();
+  const realUsesPreviewClass = await page
+    .locator("#beach")
+    .evaluate((node) => node.classList.contains("preview-tide-cleared"));
+  await page.waitForFunction(
+    () => document.querySelectorAll(".pool .critter[data-key]").length === 0,
+    null,
+    { timeout: 2_000 },
+  );
+  await capture(
+    "15-real-tide-cleared",
+    "Real tide clears only after the wash",
+    "A generated tide first moves the proved terminal crustaceans seaward, then commits the empty shared buffer.",
+  );
+  await page.waitForFunction(
+    () => document.getElementById("tide-preview")?.getAttribute("aria-busy") === "false",
+    null,
+    { timeout: 8_000 },
+  );
+  const activeAfterRealTide = await page
+    .locator(".stage .critter[data-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")).sort());
+  const realCountdown = await page.locator("#tide-countdown").innerText();
+  assertProof(
+    "real tide washes terminal outcomes before clearing",
+    realWashCount === tideBefore.length &&
+      !realUsesPreviewClass &&
+      (await page.locator(".pool .critter[data-key]").count()) === 0 &&
+      realCountdown === "0 / 20" &&
+      JSON.stringify(activeAfterRealTide) === JSON.stringify(activeBeforeRealTide),
+    {
+      washed_terminal_count: realWashCount,
+      preview_class_used: realUsesPreviewClass,
+      terminal_after: 0,
+      countdown: realCountdown,
+      active_keys_unchanged:
+        JSON.stringify(activeAfterRealTide) === JSON.stringify(activeBeforeRealTide),
+    },
+  );
+
+  const totalStatusGets = requests.filter((request) => request.path === "/api/status").length;
   const mutatingRequests = requests.filter((request) => !["GET", "HEAD"].includes(request.method));
-  const directGitHubRequests = requests.filter((request) => request.host.toLowerCase().startsWith("api.github.com"));
+  const directGitHubRequests = requests.filter((request) =>
+    request.host.toLowerCase().startsWith("api.github.com"),
+  );
   assertProof(
     "preview tide preserves live outcome data",
-    JSON.stringify(tideAfter) === JSON.stringify(tideBefore) && countdownAfter === countdownBefore,
-    { before_keys: tideBefore, after_keys: tideAfter, countdown: countdownAfter },
+    JSON.stringify(tideAfter) === JSON.stringify(tideBefore) &&
+      JSON.stringify(reducedTideAfter) === JSON.stringify(tideBefore) &&
+      countdownAfter === countdownBefore,
+    {
+      before_keys: tideBefore,
+      after_keys: tideAfter,
+      reduced_motion_after_keys: reducedTideAfter,
+      countdown: countdownAfter,
+    },
   );
-  assertProof("preview tide sends no mutation", mutatingRequests.length === 0, { mutating_requests: mutatingRequests });
-  assertProof("browser sends no GitHub API request", directGitHubRequests.length === 0, { direct_github_requests: 0 });
+  assertProof("preview tide sends no mutation", mutatingRequests.length === 0, {
+    mutating_requests: mutatingRequests,
+  });
+  assertProof("browser sends no GitHub API request", directGitHubRequests.length === 0, {
+    direct_github_requests: 0,
+  });
+  assertProof("no browser console errors", consoleErrors.length === 0, { errors: consoleErrors });
+  assertProof("no uncaught page errors", pageErrors.length === 0, { errors: pageErrors });
 
   const diagnostics = {
     fixture: "synthetic + redacted",
-    status_gets: requests.filter((request) => request.path === "/api/status").length,
+    status_gets: totalStatusGets,
     direct_github_api_requests: directGitHubRequests.length,
     mutating_requests: mutatingRequests.length,
-    terminal_before: tideBefore.length,
-    terminal_after: tideAfter.length,
+    preview_terminal_before: tideBefore.length,
+    preview_terminal_after: reducedTideAfter.length,
+    real_tide_terminal_after: 0,
     assertions_passed: assertions.length,
   };
   await page.evaluate((data) => {
@@ -608,13 +837,10 @@ try {
     document.body.append(node);
   }, diagnostics);
   await capture(
-    "12-visible-proof-diagnostics",
+    "16-visible-proof-diagnostics",
     "Network and state boundary",
-    "Visible redacted diagnostics confirm no GitHub API or mutation request and unchanged tide data.",
+    "Visible diagnostics confirm no GitHub API or mutation request, unchanged preview data, and a proved real clear.",
   );
-
-  assertProof("no browser console errors", consoleErrors.length === 0, { errors: consoleErrors });
-  assertProof("no uncaught page errors", pageErrors.length === 0, { errors: pageErrors });
 } catch (error) {
   proofError = error;
 } finally {
@@ -634,39 +860,58 @@ const manifest = {
   data_classification: "fully synthetic and redacted; no live/private dashboard payloads",
   fixture_sha256: fixtureSha256,
   fixture_snapshots: fixtureSnapshotSha256,
+  derived_real_tide_snapshot_sha256: realTideSnapshotSha256,
   generated_at: new Date().toISOString(),
   assertions,
   evidence: evidence.map(({ file: _file, ...item }, index) => ({
     ...item,
     storyboard_panel: index + 1,
   })),
-  tide_isolation: { before_keys: tideBefore, after_keys: tideAfter },
+  tide_isolation: {
+    phases: tidePhases,
+    before_keys: tideBefore,
+    after_keys: tideAfter,
+    reduced_motion_after_keys: reducedTideAfter,
+    real_tide_terminal_after: 0,
+  },
   drawer_links: drawerLinks,
   network: {
     requests,
     responses,
-    direct_github_api_requests: requests.filter((request) => request.host.toLowerCase().startsWith("api.github.com")).length,
-    mutating_requests: requests.filter((request) => !["GET", "HEAD"].includes(request.method)).length,
+    direct_github_api_requests: requests.filter((request) =>
+      request.host.toLowerCase().startsWith("api.github.com"),
+    ).length,
+    mutating_requests: requests.filter((request) => !["GET", "HEAD"].includes(request.method))
+      .length,
   },
   console_errors: consoleErrors,
   page_errors: pageErrors,
 };
-await writeFile(path.join(outputDir, "proof-summary.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+await writeFile(
+  path.join(outputDir, "proof-summary.json"),
+  `${JSON.stringify(manifest, null, 2)}\n`,
+);
 
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[character]);
+  return String(value).replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[character],
+  );
 }
 
 const cards = [];
 for (const item of evidence) {
   const bytes = await readFile(path.join(outputDir, item.file));
-  cards.push(`<article><div class="copy"><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.detail)}</p></div><img src="data:image/jpeg;base64,${bytes.toString("base64")}" alt="${escapeHtml(item.title)}"></article>`);
+  cards.push(
+    `<article><div class="copy"><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.detail)}</p></div><img src="data:image/jpeg;base64,${bytes.toString("base64")}" alt="${escapeHtml(item.title)}"></article>`,
+  );
 }
 const reportHtml = `<!doctype html><html><head><meta charset="utf-8"><title>OpenClaw Bay Playwright proof</title><style>
 *{box-sizing:border-box}body{margin:0;padding:28px;background:#edf7f5;color:#263533;font:16px/1.45 system-ui,sans-serif}header{max-width:1640px;margin:0 auto 24px;padding:24px 28px;border-radius:18px;background:#174e52;color:white;box-shadow:0 14px 35px rgba(24,67,69,.18)}header h1{margin:0 0 8px;font-size:34px}header p{margin:4px 0;color:#d9f1ed}.pass{display:inline-block;margin-top:12px;padding:7px 11px;border-radius:999px;background:#dff5dc;color:#174e52;font-weight:850}.grid{max-width:1640px;margin:auto;display:grid;grid-template-columns:1fr 1fr;gap:22px}article{overflow:hidden;border:1px solid #b8d3cf;border-radius:16px;background:white;box-shadow:0 10px 25px rgba(25,70,70,.11)}.copy{min-height:112px;padding:16px 18px;border-bottom:1px solid #d6e5e2}.copy h2{margin:0 0 6px;color:#bc4b31;font-size:21px}.copy p{margin:0;color:#536864}img{display:block;width:100%;height:auto}@media(max-width:900px){.grid{grid-template-columns:1fr}}
@@ -674,7 +919,10 @@ const reportHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Open
 const reportPath = path.join(outputDir, "playwright-proof-report.html");
 await writeFile(reportPath, reportHtml);
 
-const reportContext = await browser.newContext({ viewport: { width: 1700, height: 900 }, deviceScaleFactor: 1 });
+const reportContext = await browser.newContext({
+  viewport: { width: 1700, height: 900 },
+  deviceScaleFactor: 1,
+});
 const reportPage = await reportContext.newPage();
 await reportPage.goto(pathToFileURL(reportPath).href, { waitUntil: "load" });
 await reportPage.screenshot({
@@ -686,13 +934,19 @@ await reportPage.screenshot({
 await reportContext.close();
 await browser.close();
 
-console.log(JSON.stringify({
-  ok: true,
-  source_sha: sourceSha,
-  fixture_sha256: fixtureSha256,
-  assertions: assertions.length,
-  evidence_frames: evidence.length,
-  direct_github_api_requests: manifest.network.direct_github_api_requests,
-  mutating_requests: manifest.network.mutating_requests,
-  output_dir: outputDir,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      ok: true,
+      source_sha: sourceSha,
+      fixture_sha256: fixtureSha256,
+      assertions: assertions.length,
+      evidence_frames: evidence.length,
+      direct_github_api_requests: manifest.network.direct_github_api_requests,
+      mutating_requests: manifest.network.mutating_requests,
+      output_dir: outputDir,
+    },
+    null,
+    2,
+  ),
+);

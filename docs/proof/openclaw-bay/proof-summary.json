@@ -1,6 +1,6 @@
 {
   "proof": "OpenClaw Bay deterministic Playwright browser proof",
-  "source_sha": "29e4329647e06bfe83971506962602aab211323f",
+  "source_sha": "92f4ecceddabdcd4b72aae1cab5de64b280d7761",
   "route": "/bay-demo",
   "data_classification": "fully synthetic and redacted; no live/private dashboard payloads",
   "fixture_sha256": "FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21",
@@ -18,7 +18,8 @@
       "sha256": "39DA760BF2E1A9E982404B2F27ABAE8649EF18B21A20E558787921D314BFC4C0"
     }
   ],
-  "generated_at": "2026-07-11T19:01:20.195Z",
+  "derived_real_tide_snapshot_sha256": "CB7BD99B2ABEA3B24F7416193C97BC7DE5F950CD1A29963B003111C03920576E",
+  "generated_at": "2026-07-12T11:13:03.377Z",
   "assertions": [
     {
       "name": "real Bay route loaded",
@@ -55,7 +56,7 @@
       "name": "master sweeper animation advances",
       "status": "PASS",
       "phase": "sweeping",
-      "elapsed_animation_ms": 300
+      "elapsed_animation_ms": 283
     },
     {
       "name": "forward transition lands in reported lane",
@@ -67,7 +68,7 @@
       "status": "PASS",
       "source_hole": 1,
       "target_hole": 1,
-      "target_hole_opacity": 0.430959,
+      "target_hole_opacity": 0.392068,
       "label": "openclaw/openclaw#97722 burrowing"
     },
     {
@@ -114,9 +115,42 @@
       ]
     },
     {
-      "name": "preview tide visibly animates",
+      "name": "layered preview tide visibly animates",
       "status": "PASS",
-      "elapsed_animation_ms": 283
+      "elapsed_animation_ms": 233,
+      "tide_layers": 3
+    },
+    {
+      "name": "preview tide follows explicit visual phases",
+      "status": "PASS",
+      "phases": [
+        "incoming",
+        "crest",
+        "receding",
+        "idle"
+      ]
+    },
+    {
+      "name": "reduced-motion tide is brief and non-spatial",
+      "status": "PASS",
+      "duration": "520ms",
+      "animation_name": "none",
+      "elapsed_ms": 570
+    },
+    {
+      "name": "tide previews do not poll status",
+      "status": "PASS",
+      "before_status_gets": 3,
+      "after_status_gets": 3
+    },
+    {
+      "name": "real tide washes terminal outcomes before clearing",
+      "status": "PASS",
+      "washed_terminal_count": 3,
+      "preview_class_used": false,
+      "terminal_after": 0,
+      "countdown": "0 / 20",
+      "active_keys_unchanged": true
     },
     {
       "name": "preview tide preserves live outcome data",
@@ -127,6 +161,11 @@
         "openclaw/openclaw#97001"
       ],
       "after_keys": [
+        "openclaw/clawhub#97002",
+        "openclaw/clawsweeper#97003",
+        "openclaw/openclaw#97001"
+      ],
+      "reduced_motion_after_keys": [
         "openclaw/clawhub#97002",
         "openclaw/clawsweeper#97003",
         "openclaw/openclaw#97001"
@@ -210,25 +249,55 @@
       "storyboard_panel": 9
     },
     {
-      "id": "10-preview-tide-wave",
-      "title": "Local-only tide preview",
-      "detail": "The wave animation runs over the terminal pools without a mutation request.",
+      "id": "10-preview-tide-incoming",
+      "title": "Tide incoming along the shoreline",
+      "detail": "Layered translucent water, painted texture, foam, ripples, and bubbles approach the terminal pools.",
       "storyboard_panel": 10
     },
     {
-      "id": "11-preview-tide-cleared",
-      "title": "Preview visual clear",
-      "detail": "Terminal crustaceans fade only inside the temporary browser animation.",
+      "id": "11-preview-tide-crest",
+      "title": "Foam crest washes the terminal pools",
+      "detail": "Terminal crustaceans drift seaward only inside the temporary local preview; live outcomes remain unchanged.",
       "storyboard_panel": 11
     },
     {
-      "id": "12-visible-proof-diagnostics",
-      "title": "Network and state boundary",
-      "detail": "Visible redacted diagnostics confirm no GitHub API or mutation request and unchanged tide data.",
+      "id": "12-preview-tide-backwash",
+      "title": "Backwash leaves a wet-sand sheen",
+      "detail": "The water and foam recede toward the illustrated sea while the preview crustaceans return.",
       "storyboard_panel": 12
+    },
+    {
+      "id": "13-preview-tide-restored",
+      "title": "Preview returns to live state",
+      "detail": "The shoreline is restored and every terminal crustacean returns after the non-mutating preview.",
+      "storyboard_panel": 13
+    },
+    {
+      "id": "14-preview-tide-reduced-motion",
+      "title": "Reduced-motion tide cue",
+      "detail": "Motion-sensitive users receive a brief static shoreline wash with the same non-mutating semantics.",
+      "storyboard_panel": 14
+    },
+    {
+      "id": "15-real-tide-cleared",
+      "title": "Real tide clears only after the wash",
+      "detail": "A generated tide first moves the proved terminal crustaceans seaward, then commits the empty shared buffer.",
+      "storyboard_panel": 15
+    },
+    {
+      "id": "16-visible-proof-diagnostics",
+      "title": "Network and state boundary",
+      "detail": "Visible diagnostics confirm no GitHub API or mutation request, unchanged preview data, and a proved real clear.",
+      "storyboard_panel": 16
     }
   ],
   "tide_isolation": {
+    "phases": [
+      "incoming",
+      "crest",
+      "receding",
+      "idle"
+    ],
     "before_keys": [
       "openclaw/clawhub#97002",
       "openclaw/clawsweeper#97003",
@@ -238,7 +307,13 @@
       "openclaw/clawhub#97002",
       "openclaw/clawsweeper#97003",
       "openclaw/openclaw#97001"
-    ]
+    ],
+    "reduced_motion_after_keys": [
+      "openclaw/clawhub#97002",
+      "openclaw/clawsweeper#97003",
+      "openclaw/openclaw#97001"
+    ],
+    "real_tide_terminal_after": 0
   },
   "drawer_links": [
     {
@@ -271,6 +346,12 @@
       {
         "method": "GET",
         "host": "bay-proof.test:8787",
+        "path": "/bay-assets/bay-background.webp",
+        "resource_type": "image"
+      },
+      {
+        "method": "GET",
+        "host": "bay-proof.test:8787",
         "path": "/api/status",
         "resource_type": "fetch"
       },
@@ -283,14 +364,14 @@
       {
         "method": "GET",
         "host": "bay-proof.test:8787",
-        "path": "/bay-assets/bay-background.webp",
+        "path": "/bay-assets/crustaceans-atlas.webp",
         "resource_type": "image"
       },
       {
         "method": "GET",
         "host": "bay-proof.test:8787",
-        "path": "/bay-assets/crustaceans-atlas.webp",
-        "resource_type": "image"
+        "path": "/api/status",
+        "resource_type": "fetch"
       },
       {
         "method": "GET",
@@ -314,6 +395,11 @@
       {
         "status": 200,
         "host": "bay-proof.test:8787",
+        "path": "/bay-assets/bay-background.webp"
+      },
+      {
+        "status": 200,
+        "host": "bay-proof.test:8787",
         "path": "/bay-assets/master-sweeper.webp"
       },
       {
@@ -324,12 +410,12 @@
       {
         "status": 200,
         "host": "bay-proof.test:8787",
-        "path": "/bay-assets/bay-background.webp"
+        "path": "/bay-assets/crustaceans-atlas.webp"
       },
       {
         "status": 200,
         "host": "bay-proof.test:8787",
-        "path": "/bay-assets/crustaceans-atlas.webp"
+        "path": "/api/status"
       },
       {
         "status": 200,

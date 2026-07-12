@@ -14,27 +14,31 @@ The sequence proves:
 - GitHub-reference search and focus;
 - repository filtering;
 - the read-only drawer's safe GitHub item, job, and workflow-run links;
-- the local-only tide animation preserving the terminal keys and count; and
+- the local-only tide preview advancing through incoming, crest, backwash, and restored states while preserving terminal keys and count;
+- the short static reduced-motion tide cue preserving the same preview state;
+- a generated real tide visibly washing terminal crustaceans before clearing the shared buffer; and
 - zero browser-to-GitHub API requests, mutation requests, console errors, or
   uncaught page errors.
 
 ## Artifacts
 
 - [`playwright-proof-storyboard.jpg`](playwright-proof-storyboard.jpg) is a
-  labelled 12-state contact sheet that can be inspected without video codecs.
+  labelled 16-state contact sheet that can be inspected without video codecs.
 - [`trace.zip`](trace.zip) is the Playwright action, DOM snapshot, and network
   trace. Open it with
   `npx --yes playwright@1.60.0 show-trace docs/proof/openclaw-bay/trace.zip`.
-- [`proof-summary.json`](proof-summary.json) records all 19 passing assertions,
-  sanitized request/response metadata, safe drawer links, and the unchanged
-  terminal keys before and after tide preview.
+- [`proof-summary.json`](proof-summary.json) records all 23 passing assertions,
+  sanitized request/response metadata, safe drawer links, the unchanged
+  terminal keys before and after both preview modes, and the proved real-tide
+  clear.
 - [`run-proof.mjs`](run-proof.mjs) contains the Playwright assertions and
   artifact renderer. [`run-proof.sh`](run-proof.sh) installs the pinned
   Playwright package in `/tmp`, starts the real local Wrangler Worker, and runs
   that script without changing repository dependencies.
-- [`fixtures/`](fixtures/) contains the exact three synthetic `/api/status`
-  responses used by the run. The runner fails before launching Chromium if
-  they no longer match its expected transition sequence.
+- [`fixtures/`](fixtures/) contains the exact three checked-in synthetic
+  `/api/status` transition responses. The runner derives a fourth real-tide
+  response from the final fixture and records its SHA-256 in the summary. It
+  fails before launching Chromium if the checked-in sequence drifts.
 
 The compact trace intentionally omits Playwright's continuous screenshot film
 strip; the storyboard supplies the visual milestones while the trace supplies
@@ -55,9 +59,9 @@ crabbox run \
 
 ## Provenance and privacy
 
-- implementation source: `29e4329647e06bfe83971506962602aab211323f`
+- implementation source: `92f4ecceddabdcd4b72aae1cab5de64b280d7761` plus the reviewed local tide patch
 - provider: Crabbox `local-container`
-- lease: `cbx_1415645b8c3c` (`crimson-prawn`)
+- lease: `cbx_bf388662693f` (`brisk-lobster`)
 - image: `mcr.microsoft.com/playwright:v1.60.0-noble`
 - fixture SHA-256:
   `FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21`
@@ -68,6 +72,8 @@ crabbox run \
     `34AA3F22C198D67C3FB6B9E9731C13ACD55E37E27BD829FABA54399124A2A0E2`
   - `03-retrigger.json`:
     `39DA760BF2E1A9E982404B2F27ABAE8649EF18B21A20E558787921D314BFC4C0`
+- derived real-tide response:
+  `CB7BD99B2ABEA3B24F7416193C97BC7DE5F950CD1A29963B003111C03920576E`
 
 The browser allowed only `bay-proof.test:8787`, mapped to the local Wrangler
 Worker. The trace contains no cookies or authorization headers. A binary text
