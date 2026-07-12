@@ -1,6 +1,6 @@
 {
   "proof": "OpenClaw Bay deterministic Playwright browser proof",
-  "source_sha": "bff3d06bf47938e4979d64054f5298f9cec7807c",
+  "source_sha": "8f7a6544492fa28d29aec3f8f8e98d1bc7ee14dd",
   "route": "/bay-demo",
   "data_classification": "fully synthetic and redacted; no live/private dashboard payloads",
   "fixture_sha256": "FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21",
@@ -19,7 +19,7 @@
     }
   ],
   "derived_real_tide_snapshot_sha256": "1B1B049ECB65CA4548053E92C99373B6A900B76E409A75029E596E7754746049",
-  "generated_at": "2026-07-12T13:12:20.678Z",
+  "generated_at": "2026-07-12T13:31:47.454Z",
   "assertions": [
     {
       "name": "real Bay route loaded",
@@ -46,7 +46,7 @@
     {
       "name": "crustacean claw animation advances",
       "status": "PASS",
-      "elapsed_animation_ms": 283
+      "elapsed_animation_ms": 300
     },
     {
       "name": "forward transition raises READY flag",
@@ -68,7 +68,7 @@
       "status": "PASS",
       "source_hole": 1,
       "target_hole": 1,
-      "target_hole_opacity": 0.431111,
+      "target_hole_opacity": 0.392233,
       "label": "openclaw/openclaw#97722 burrowing"
     },
     {
@@ -135,7 +135,7 @@
       "status": "PASS",
       "duration": "520ms",
       "animation_name": "none",
-      "elapsed_ms": 654
+      "elapsed_ms": 638
     },
     {
       "name": "tide previews do not poll status",
@@ -148,6 +148,13 @@
       "status": "PASS",
       "completed": 9,
       "overflow_notes": 0
+    },
+    {
+      "name": "dense terminal pool keeps references readable at narrow width",
+      "status": "PASS",
+      "references": 9,
+      "overlaps": false,
+      "columns": "2"
     },
     {
       "name": "real tide washes terminal outcomes before clearing",

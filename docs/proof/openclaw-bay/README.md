@@ -16,7 +16,7 @@ The sequence proves:
 - the read-only drawer's safe GitHub item, job, and workflow-run links;
 - the local-only tide preview advancing through incoming, crest, backwash, and restored states while preserving terminal keys and count;
 - the short static reduced-motion tide cue preserving the same preview state;
-- nine completed outcomes fitting individually in the expanded, staggered terminal pool without a hidden overflow; and
+- nine completed outcomes fitting individually in the expanded terminal pool without a hidden overflow, including a two-column narrow-width layout with no reference-label intersections; and
 - a generated real tide visibly washing terminal crustaceans before clearing the shared buffer; and
 - zero browser-to-GitHub API requests, mutation requests, console errors, or
   uncaught page errors.
@@ -28,7 +28,7 @@ The sequence proves:
 - [`trace.zip`](trace.zip) is the Playwright action, DOM snapshot, and network
   trace. Open it with
   `npx --yes playwright@1.60.0 show-trace docs/proof/openclaw-bay/trace.zip`.
-- [`proof-summary.json`](proof-summary.json) records all 24 passing assertions,
+- [`proof-summary.json`](proof-summary.json) records all 25 passing assertions,
   sanitized request/response metadata, safe drawer links, the unchanged
   terminal keys before and after both preview modes, and the proved real-tide
   clear.
@@ -63,9 +63,9 @@ crabbox run \
 
 ## Provenance and privacy
 
-- implementation source: `bff3d06bf47938e4979d64054f5298f9cec7807c`
+- implementation source: `8f7a6544492fa28d29aec3f8f8e98d1bc7ee14dd`
 - provider: Crabbox `local-container`
-- lease: `cbx_051897f0a24d` (`silver-crayfish`)
+- lease: `cbx_f6ede4a47f71` (`violet-crayfish`)
 - image: `mcr.microsoft.com/playwright:v1.60.0-noble`
 - fixture SHA-256:
   `FC584F8F0521221B77897384BDEB3A167E85AA6C17708A7783740FCDF363CD21`
