@@ -30,6 +30,7 @@ import {
 import {
   AUTOMATION_LIMITS,
   WORKER_CONFIG,
+  exactReviewQueuePressure,
   readWorkerConfig,
   workerLimit,
 } from "../../dist/repair/limits.js";
@@ -247,6 +248,62 @@ test("worker scheduler keeps 104 slots available for steady background work", ()
     WORKER_CONFIG.workers.expansion_reserve;
   assert.equal(quietBackgroundCapacity, 104);
   assert.ok(quietBackgroundCapacity >= Math.floor(WORKER_CONFIG.workers.max * 0.8));
+});
+
+test("exact-review queue pressure throttles only background review lanes", () => {
+  assert.equal(
+    exactReviewQueuePressure({ pending: 0, dispatching: 0, leased: 28, capacity: 28 }),
+    "idle",
+  );
+  assert.equal(
+    exactReviewQueuePressure({ pending: 1, dispatching: 0, leased: 27, capacity: 28 }),
+    "idle",
+  );
+  assert.equal(
+    exactReviewQueuePressure({ pending: 3, dispatching: 1, leased: 27, capacity: 28 }),
+    "congested",
+  );
+  assert.equal(
+    exactReviewQueuePressure({ pending: 28, dispatching: 0, leased: 28, capacity: 28 }),
+    "saturated",
+  );
+
+  assert.equal(
+    workerLimit("normal_review", { exactReviewPressure: "congested" }),
+    AUTOMATION_LIMITS.exact_review.background_congested_max_workers,
+  );
+  assert.equal(
+    workerLimit("hot_intake", { exactReviewPressure: "saturated" }),
+    AUTOMATION_LIMITS.exact_review.background_saturated_max_workers,
+  );
+  assert.equal(
+    workerLimit("commit_review", { exactReviewPressure: "saturated" }),
+    AUTOMATION_LIMITS.exact_review.background_saturated_max_workers,
+  );
+  assert.equal(
+    workerLimit("repair", { exactReviewPressure: "saturated" }),
+    AUTOMATION_LIMITS.repair_live_runs.default,
+  );
+});
+
+test("workflow utility CLI classifies exact-review queue pressure", () => {
+  const output = execFileSync(
+    process.execPath,
+    [
+      path.resolve("dist/repair/workflow-utils.js"),
+      "exact-review-pressure",
+      "--pending",
+      "28",
+      "--dispatching",
+      "0",
+      "--leased",
+      "28",
+      "--capacity",
+      "28",
+    ],
+    { cwd: process.cwd(), encoding: "utf8" },
+  );
+  assert.equal(output, "saturated");
 });
 
 test("worker config defaults imported cluster repair capacity for older configs", () => {

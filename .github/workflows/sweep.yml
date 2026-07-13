@@ -1550,12 +1550,27 @@ jobs:
       - id: mode
         env:
           GH_TOKEN: ${{ github.token }}
+          QUEUE_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
         run: |
           limit() {
             pnpm --dir clawsweeper run --silent workflow -- limit "$1"
           }
           worker_limit() {
             pnpm --dir clawsweeper run --silent workflow -- worker-limit "$@"
+          }
+          exact_review_queue_stats() {
+            local queue_url response
+            queue_url="${QUEUE_URL%/}"
+            response="$(curl --fail --silent --connect-timeout 5 --max-time 10 "$queue_url/api/status" 2>/dev/null)" || return 1
+            printf '%s' "$response" | jq -r '
+              def count: if type == "number" and . >= 0 then floor else 0 end;
+              [
+                (.exact_review_queue.pending // 0 | count),
+                (.exact_review_queue.dispatching // 0 | count),
+                (.exact_review_queue.leased // 0 | count),
+                (.exact_review_queue.handoff_health.capacity // 0 | count)
+              ] | @tsv
+            ' 2>/dev/null
           }
           active_runs_json() {
             {
@@ -1684,10 +1699,25 @@ jobs:
           normal_active_floor="$(limit review_shards.normal_active_floor)"
           hard_shard_cap="$(limit review_shards.hard_cap)"
           commit_page_size="$(limit commit_review.page_size_default)"
+          exact_review_pressure="idle"
+          exact_review_pending=0
+          exact_review_dispatching=0
+          exact_review_leased=0
+          exact_review_capacity=0
+          if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_dispatching exact_review_leased exact_review_capacity <<< "$exact_review_stats"; then
+            exact_review_pressure="$(pnpm --dir clawsweeper run --silent workflow -- exact-review-pressure \
+              --pending "$exact_review_pending" \
+              --dispatching "$exact_review_dispatching" \
+              --leased "$exact_review_leased" \
+              --capacity "$exact_review_capacity")" || exact_review_pressure="idle"
+          fi
           active_critical_workers="$(( $(active_run_count ".github/workflows/repair-cluster-worker.yml") + $(active_sweep_exact_workers) ))"
           active_background_workers="$(( $(active_run_count ".github/workflows/commit-review.yml") * commit_page_size + $(active_sweep_background_workers) ))"
-          hot_intake_shards="$(worker_limit hot_intake --active-critical "$active_critical_workers" --active-background "$active_background_workers")"
-          normal_shards="$(worker_limit normal_review --active-critical "$active_critical_workers" --active-background "$active_background_workers")"
+          hot_intake_shards="$(worker_limit hot_intake --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
+          normal_shards="$(worker_limit normal_review --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
+          if [ "$exact_review_pressure" != "idle" ]; then
+            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling broad review intake."
+          fi
           hot_intake="${{ ((github.event_name == 'repository_dispatch' && github.event.client_payload.hot_intake == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.hot_intake == 'true') || (github.event_name == 'schedule' && (github.event.schedule == '*/5 * * * *' || github.event.schedule == '2/5 * * * *'))) && 'true' || 'false' }}"
           exact_item="${{ github.event.client_payload.item_number || github.event.inputs.item_number || github.event.inputs.item_numbers || '' }}"
           target_repo="${{ steps.target.outputs.target_repo }}"

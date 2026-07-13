@@ -2118,6 +2118,36 @@ test("background review capacity reserves expanding matrices and caps broad manu
   assert.match(commitBlock, /reserved_shards="\$item_count"/);
 });
 
+test("background review schedulers yield to a saturated exact-review queue", () => {
+  const sweepWorkflow = readText(".github/workflows/sweep.yml");
+  const sweepBlock = sweepWorkflow.slice(
+    sweepWorkflow.indexOf("- id: mode"),
+    sweepWorkflow.indexOf("- id: select"),
+  );
+  const commitWorkflow = readText(".github/workflows/commit-review.yml");
+  const commitBlock = commitWorkflow.slice(
+    commitWorkflow.indexOf("- name: Select commits"),
+    commitWorkflow.indexOf('if [ "$ENABLED" = "false" ]'),
+  );
+
+  for (const block of [sweepBlock, commitBlock]) {
+    assert.match(block, /QUEUE_URL: \$\{\{ vars\.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL/);
+    assert.match(block, /exact_review_queue_stats\(\)/);
+    assert.match(block, /\$queue_url\/api\/status/);
+    assert.match(block, /exact-review-pressure/);
+    assert.match(block, /--exact-review-pressure "\$exact_review_pressure"/);
+    assert.match(block, /throttling .*review intake/);
+  }
+  assert.match(sweepBlock, /worker_limit hot_intake.*--exact-review-pressure/);
+  assert.match(sweepBlock, /worker_limit normal_review.*--exact-review-pressure/);
+  assert.match(commitBlock, /scheduler_page_size=.*worker-limit commit_review/);
+  assert.match(
+    commitBlock,
+    /elif \[ "\$exact_review_pressure" != "idle" \] && \[\[ "\$PAGE_SIZE" =~ \^\[0-9\]\+\$ \]\]/,
+  );
+  assert.match(commitBlock, /Capping commit-review page size/);
+});
+
 test("review backstops identify sweep runs by stable workflow path", () => {
   const workflow = readText(".github/workflows/sweep.yml");
   const block = workflow.slice(workflow.indexOf("- name: Queue review backstops"));

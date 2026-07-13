@@ -27,6 +27,9 @@ The mental model:
 - Assist has a small fixed cap because it is lightweight maintainer Q&A, not a
   derived review or repair lane.
 - Background lanes shrink when priority work is already active.
+- A saturated exact-review queue further reduces broad review work so its
+  backlog can recover without competing for Codex, GitHub, or state-publish
+  capacity.
 - Runtime overrides are escape hatches, not the normal tuning surface.
 
 ## Worker Budget
@@ -39,6 +42,8 @@ The mental model:
 | `workers.minimum_background`               |      16 | Target floor for background progress when enough global capacity is available.        |
 | `lanes.exact_review.max_concurrent`        |      64 | Maximum concurrent exact-item review workflow runs admitted to Codex.                 |
 | `lanes.exact_review.target_max_concurrent` |      60 | Maximum concurrent exact-item review workflow runs one target repository may consume. |
+| `lanes.exact_review.background_congested_max_workers` | 16 | Broad review cap while every exact-review slot is active and work is waiting. |
+| `lanes.exact_review.background_saturated_max_workers` | 4 | Broad review cap while every exact-review slot is active and at least one full lane is waiting. |
 | `lanes.assist.max`                         |      10 | Maximum concurrent lightweight assist jobs.                                           |
 | `lanes.repair.cluster_max_live_runs`       |       2 | Default live repair workflow cap for imported gitcrawl cluster dispatches.            |
 
@@ -55,6 +60,8 @@ by default.
 | --------------------------------------------------- | ------: | ------------------------------------------------------------------------------------- |
 | `exact_review.concurrent_max`                       |      64 | Exact-item review admission cap, clamped to `workers.max`.                            |
 | `exact_review.target_concurrent_max`                |      60 | Exact-item per-target admission cap, clamped to global exact-review capacity.         |
+| `exact_review.background_congested_max_workers`     |      16 | Broad review worker cap for a full exact-review queue with pending work.              |
+| `exact_review.background_saturated_max_workers`     |       4 | Broad review worker cap for a full queue with at least one lane's worth waiting.      |
 | `assist.default`                                    |      10 | Maintainer assist job cap.                                                            |
 | `review_shards.normal_default`                      |      89 | Quiet-system normal review shard ceiling.                                             |
 | `review_shards.normal_active_floor`                 |      38 | Minimum active normal review shards to keep queued for `openclaw/openclaw`.           |
@@ -99,7 +106,19 @@ The scheduler does this for background lanes:
 4. reserve `workers.reserve_for_interactive`
 5. reserve `workers.expansion_reserve` for independently planned matrix waves
 6. cap the result at the lane's derived quiet-system ceiling
-7. return at least 1 so an enabled lane can still make slow progress
+7. when the durable exact-review queue is full with pending work, cap broad
+   lanes at `lanes.exact_review.background_congested_max_workers`
+8. when that full queue has at least one queue-capacity worth of pending work,
+   cap broad lanes at `lanes.exact_review.background_saturated_max_workers`
+9. return at least 1 so an enabled lane can still make slow progress
+
+The workflow reads the public queue snapshot before admitting normal review,
+hot intake, or commit-review work. A failed or malformed snapshot is fail-open:
+the existing active-worker calculation remains in effect. Exact-review admission
+itself remains governed by the durable queue's separate global and per-target
+caps; these background caps reduce competing work rather than raising those
+admission limits. An explicit commit-review page-size override remains unchanged
+while the queue is idle, but is capped while exact-review pressure is present.
 
 Background planner jobs serialize per target repository. A sweep that is still
 planning, queued, or expanding its matrix reserves its quiet lane size. Once

@@ -164,6 +164,7 @@ jobs:
           SOURCE_REF: ${{ github.event.client_payload.ref || 'refs/heads/main' }}
           SETTLE_SECONDS: ${{ vars.CLAWSWEEPER_COMMIT_REVIEW_SETTLE_SECONDS || '60' }}
           PAGE_SIZE: ${{ vars.CLAWSWEEPER_COMMIT_REVIEW_PAGE_SIZE || '' }}
+          QUEUE_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
         run: |
           set -euo pipefail
           active_runs_json() {
@@ -182,6 +183,20 @@ jobs:
             printf '%s' "$ACTIVE_RUNS_JSON" \
               | WORKFLOW_PATH="$1" STALE_QUEUED_CUTOFF="$STALE_QUEUED_CUTOFF" jq '[.[] | select(.workflowPath == env.WORKFLOW_PATH) | select(.status == "in_progress" or ((.status == "pending" or .status == "queued" or .status == "waiting" or .status == "requested") and ((.updatedAt // .createdAt // "") >= env.STALE_QUEUED_CUTOFF)))] | length' 2>/dev/null \
               || printf '0'
+          }
+          exact_review_queue_stats() {
+            local queue_url response
+            queue_url="${QUEUE_URL%/}"
+            response="$(curl --fail --silent --connect-timeout 5 --max-time 10 "$queue_url/api/status" 2>/dev/null)" || return 1
+            printf '%s' "$response" | jq -r '
+              def count: if type == "number" and . >= 0 then floor else 0 end;
+              [
+                (.exact_review_queue.pending // 0 | count),
+                (.exact_review_queue.dispatching // 0 | count),
+                (.exact_review_queue.leased // 0 | count),
+                (.exact_review_queue.handoff_health.capacity // 0 | count)
+              ] | @tsv
+            ' 2>/dev/null
           }
           active_sweep_background_workers() {
             local runs total id title status jobs_json active_shards total_shards
@@ -251,10 +266,29 @@ jobs:
               | STALE_QUEUED_CUTOFF="$STALE_QUEUED_CUTOFF" jq '[.[] | select(.workflowPath == ".github/workflows/sweep.yml") | select((.status == "in_progress" or ((.status == "pending" or .status == "queued" or .status == "waiting" or .status == "requested") and ((.updatedAt // .createdAt // "") >= env.STALE_QUEUED_CUTOFF))) and (.displayTitle | startswith("Review event item ")))] | length' 2>/dev/null \
               || printf '0'
           }
+          active_critical_workers="$(( $(active_run_count ".github/workflows/repair-cluster-worker.yml") + $(active_sweep_exact_count) ))"
+          active_background_workers="$(active_sweep_background_workers)"
+          exact_review_pressure="idle"
+          exact_review_pending=0
+          exact_review_dispatching=0
+          exact_review_leased=0
+          exact_review_capacity=0
+          if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_dispatching exact_review_leased exact_review_capacity <<< "$exact_review_stats"; then
+            exact_review_pressure="$(pnpm --dir clawsweeper run --silent workflow -- exact-review-pressure \
+              --pending "$exact_review_pending" \
+              --dispatching "$exact_review_dispatching" \
+              --leased "$exact_review_leased" \
+              --capacity "$exact_review_capacity")" || exact_review_pressure="idle"
+          fi
+          scheduler_page_size="$(pnpm --dir clawsweeper run --silent workflow -- worker-limit commit_review --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
           if [ -z "$PAGE_SIZE" ]; then
-            active_critical_workers="$(( $(active_run_count ".github/workflows/repair-cluster-worker.yml") + $(active_sweep_exact_count) ))"
-            active_background_workers="$(active_sweep_background_workers)"
-            PAGE_SIZE="$(pnpm --dir clawsweeper run --silent workflow -- worker-limit commit_review --active-critical "$active_critical_workers" --active-background "$active_background_workers")"
+            PAGE_SIZE="$scheduler_page_size"
+          elif [ "$exact_review_pressure" != "idle" ] && [[ "$PAGE_SIZE" =~ ^[0-9]+$ ]] && [ "$PAGE_SIZE" -gt "$scheduler_page_size" ]; then
+            echo "::notice::Capping commit-review page size from $PAGE_SIZE to $scheduler_page_size because exact-review queue is $exact_review_pressure."
+            PAGE_SIZE="$scheduler_page_size"
+          fi
+          if [ "$exact_review_pressure" != "idle" ]; then
+            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling commit review intake."
           fi
           page_size_hard_cap="$(pnpm --dir clawsweeper run --silent workflow -- limit commit_review.page_size_hard_cap)"
           if [ "$ENABLED" = "false" ]; then
