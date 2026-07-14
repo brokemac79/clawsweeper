@@ -1984,15 +1984,29 @@ test("sweep workflow_dispatch input count stays under GitHub limit", () => {
   assert.ok(inputNames.length <= 25, `workflow_dispatch has ${inputNames.length} inputs`);
 });
 
-test("sweep review continuations stay workflow-dispatch compatible", () => {
+test("sweep review continuations reapply the current pressure cap", () => {
   const workflow = readText(".github/workflows/sweep.yml");
   const continueBlock = workflow.slice(
     workflow.indexOf("- name: Continue sweep"),
     workflow.indexOf("\n\n  recover-review-failures:"),
   );
-
   assert.match(continueBlock, /-f target_repo="\$\{\{ needs\.plan\.outputs\.target_repo \}\}"/);
   assert.match(continueBlock, /-f target_branch="\$\{\{ needs\.plan\.outputs\.target_branch \}\}"/);
+  const modeBlock = workflow.slice(
+    workflow.indexOf("- id: mode"),
+    workflow.indexOf("- id: select"),
+  );
+
+  assert.match(continueBlock, /-f shard_count="\$\{\{ needs\.plan\.outputs\.shard_count \}\}"/);
+  assert.match(
+    modeBlock,
+    /shard_count="\$\{\{ github\.event\.client_payload\.shard_count \|\| github\.event\.inputs\.shard_count \|\| '' \}\}"/,
+  );
+  assert.match(modeBlock, /if \[ -z "\$exact_item" \]; then/);
+  assert.match(modeBlock, /lane_shard_cap="\$normal_shards"/);
+  assert.match(modeBlock, /lane_shard_cap="\$hot_intake_shards"/);
+  assert.match(modeBlock, /if \[ "\$shard_count" -gt "\$lane_shard_cap" \]; then/);
+  assert.match(modeBlock, /Capping broad background review shards/);
 });
 
 test("failed review recovery waits for durable exact-review queue acknowledgement", () => {
