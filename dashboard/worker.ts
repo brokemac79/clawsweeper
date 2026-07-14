@@ -2179,7 +2179,7 @@ export async function exactReviewQueueStatusSnapshot(env) {
   ) {
     throw new Error(String(body.error || "exact-review queue status unavailable"));
   }
-  return body;
+  return { ...body, generated_at: new Date().toISOString() };
 }
 
 async function authenticatedExactReviewEnqueue(request, env) {

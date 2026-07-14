@@ -106,19 +106,21 @@ The scheduler does this for background lanes:
 4. reserve `workers.reserve_for_interactive`
 5. reserve `workers.expansion_reserve` for independently planned matrix waves
 6. cap the result at the lane's derived quiet-system ceiling
-7. when the durable exact-review queue is full, its dispatcher and handoff are
-   healthy, and it has target-admissible pending work, cap broad lanes at
+7. when the durable exact-review queue is full, its dispatcher is active, its
+   handoff state is known, and it has target-admissible pending work, cap broad lanes at
    `lanes.exact_review.background_congested_max_workers`
-8. when that healthy full queue has at least one queue-capacity worth of
+8. when that full queue has at least one queue-capacity worth of
    target-admissible pending work, cap broad lanes at
    `lanes.exact_review.background_saturated_max_workers`
 9. return at least 1 so an enabled lane can still make slow progress
 
 The workflow reads the public queue snapshot before admitting normal review,
-hot intake, or commit-review work. A failed or malformed snapshot, a paused or
-blocked dispatcher, a non-healthy handoff, retry-delayed pending work, or work
+hot intake, or commit-review work. A failed, stale, malformed, or unknown
+snapshot; a paused or blocked dispatcher; retry-delayed pending work; or work
 blocked by its target's exact-review cap is fail-open: the existing active-worker
-calculation remains in effect.
+calculation remains in effect. A valid `degraded` or `stalled` handoff does not
+cause recovery work or lease mutation, but it does preserve the protective
+background cap while the exact-review lane is full and has admissible backlog.
 Exact-review admission itself remains governed by the durable queue's separate
 global and per-target caps; these background caps reduce competing work rather
 than raising those admission limits. An explicit commit-review page-size override
@@ -202,6 +204,9 @@ hot intake `14`, and commit review `2`. Existing repair lanes keep their
 
 - `CLAWSWEEPER_COMMIT_REVIEW_PAGE_SIZE` overrides
   `commit_review.page_size_default`.
+- `CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS` sets the maximum age of a
+  trusted exact-review queue snapshot for scheduler reshuffling. The default is
+  900 seconds; values below 60 seconds fall back to that default.
 - `CLAWSWEEPER_FEATURE_CLUSTER_REPAIR_ENABLED=1` enables the scheduled
   `repair-cluster-intake.yml` imported-cluster intake. Direct repair import and
   dispatch commands are not blocked by this variable; they keep the existing

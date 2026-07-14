@@ -51,6 +51,7 @@ test("dashboard status reads the exact-review handoff model from the durable que
   assert.equal(status.leased, 0);
   assert.equal(status.handoff_health.status, "healthy");
   assert.equal(status.handoff_health.phases.pending.count, 1);
+  assert.match(status.generated_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(await exactReviewQueueStatusSnapshot({}), null);
 });
 
@@ -5598,8 +5599,12 @@ test("dashboard serves stale status while coalescing one background refresh", as
     const firstStatus = await first.json();
     const secondStatus = await second.json();
     assert.equal(firstStatus.pipeline[0].id, "stale-row");
+    assert.equal(firstStatus.generated_at, "2026-06-13T18:00:00Z");
     assert.equal(firstStatus.exact_review_queue.pending, 7);
+    assert.match(firstStatus.exact_review_queue.generated_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.notEqual(firstStatus.exact_review_queue.generated_at, firstStatus.generated_at);
     assert.equal(firstStatus.exact_review_queue.handoff_health.status, "healthy");
+    assert.match(secondStatus.exact_review_queue.generated_at, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(secondStatus.exact_review_queue.handoff_health.status, "healthy");
     assert.equal(waitUntilPromises.length, 2);
 

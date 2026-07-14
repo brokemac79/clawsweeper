@@ -2132,8 +2132,16 @@ test("background review schedulers yield to a saturated exact-review queue", () 
 
   for (const block of [sweepBlock, commitBlock]) {
     assert.match(block, /QUEUE_URL: \$\{\{ vars\.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL/);
+    assert.match(
+      block,
+      /CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS: \$\{\{ vars\.CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS/,
+    );
     assert.match(block, /exact_review_queue_stats\(\)/);
     assert.match(block, /\$queue_url\/api\/status/);
+    assert.match(block, /exact_review_queue\.generated_at/);
+    assert.match(block, /CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS/);
+    assert.match(block, /date -u -d "\$generated_at" '\+%s'/);
+    assert.match(block, /queue telemetry snapshot is stale/);
     assert.match(block, /admissible_pending/);
     assert.match(block, /dispatcher\.state/);
     assert.match(block, /handoff_health\.status/);
@@ -2158,6 +2166,85 @@ test("background review schedulers yield to a saturated exact-review queue", () 
     sweepBlock,
     /throttling broad review intake to normal=\$normal_shards and hot=\$hot_intake_shards/,
   );
+});
+
+function extractWorkflowShellFunction(block: string, functionName: string): string {
+  const header = `${functionName}() {`;
+  const start = block.indexOf(header);
+  assert.notEqual(start, -1, `missing shell function ${functionName}`);
+  const rest = block.slice(start);
+  const next = rest.slice(header.length).search(/\n          [a-zA-Z0-9_]+\(\) \{/);
+  const end = next === -1 ? rest.length : header.length + next;
+  return rest.slice(0, end).replace(/^          /gm, "");
+}
+
+function runExactReviewQueueStats(block: string, response: Record<string, unknown>): string {
+  const functionBody = extractWorkflowShellFunction(block, "exact_review_queue_stats");
+  const script = [
+    functionBody,
+    `jq() {
+      if [[ "$*" == *generated_at* ]]; then
+        node -e 'const fs=require("fs");const data=JSON.parse(fs.readFileSync(0,"utf8"));const q=data.exact_review_queue||{};const value=typeof q.generated_at==="string"?q.generated_at:"";process.stdout.write(value+"\\n");'
+      else
+        node -e 'const fs=require("fs");const data=JSON.parse(fs.readFileSync(0,"utf8"));const q=data.exact_review_queue||{};const count=(value)=>Number.isFinite(value)&&value>=0?Math.floor(value):0;const text=(value)=>typeof value==="string"?value:"";console.log([count(q.pending),count(q.admissible_pending),count(q.dispatching),count(q.leased),count(q.handoff_health&&q.handoff_health.capacity),text(q.dispatcher&&q.dispatcher.state),text(q.handoff_health&&q.handoff_health.status)].join("\\t"));'
+      fi
+    }`,
+    'curl() { printf "%s" "$QUEUE_RESPONSE"; }',
+    'QUEUE_URL="https://queue.example"',
+    'output="$(exact_review_queue_stats 2>&1)"',
+    "status=$?",
+    'printf "status=%s\\n%s" "$status" "$output"',
+  ].join("\n");
+  return execFileSync("bash", ["-lc", script], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS: "60",
+      QUEUE_RESPONSE: JSON.stringify(response),
+    },
+  });
+}
+
+test("background review schedulers fail open on stale exact-review telemetry", () => {
+  const sweepWorkflow = readText(".github/workflows/sweep.yml");
+  const sweepBlock = sweepWorkflow.slice(
+    sweepWorkflow.indexOf("- id: mode"),
+    sweepWorkflow.indexOf("- id: select"),
+  );
+  const commitWorkflow = readText(".github/workflows/commit-review.yml");
+  const commitBlock = commitWorkflow.slice(
+    commitWorkflow.indexOf("- name: Select commits"),
+    commitWorkflow.indexOf('if [ "$ENABLED" = "false" ]'),
+  );
+  const freshGeneratedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const healthyFullQueue = {
+    generated_at: "1970-01-01T00:00:00Z",
+    exact_review_queue: {
+      generated_at: freshGeneratedAt,
+      pending: 243,
+      admissible_pending: 243,
+      dispatching: 0,
+      leased: 28,
+      handoff_health: { capacity: 28, status: "healthy" },
+      dispatcher: { state: "active" },
+    },
+  };
+  const staleHealthyQueue = {
+    ...healthyFullQueue,
+    exact_review_queue: {
+      ...healthyFullQueue.exact_review_queue,
+      generated_at: "1970-01-01T00:00:00Z",
+    },
+  };
+
+  for (const block of [sweepBlock, commitBlock]) {
+    const freshOutput = runExactReviewQueueStats(block, healthyFullQueue);
+    assert.match(freshOutput, /^status=0\n243\t243\t0\t28\t28\tactive\thealthy$/);
+
+    const staleOutput = runExactReviewQueueStats(block, staleHealthyQueue);
+    assert.match(staleOutput, /^status=1\n/);
+    assert.match(staleOutput, /queue telemetry snapshot is stale/);
+  }
 });
 
 test("review backstops identify sweep runs by stable workflow path", () => {

@@ -215,12 +215,14 @@ export function exactReviewQueuePressure({
   const active = nonNegative(dispatching) + nonNegative(leased);
   const normalizedPending = nonNegative(pending);
   const normalizedAdmissiblePending = Math.min(normalizedPending, nonNegative(admissiblePending));
+  const knownHandoffState =
+    handoffHealth === "healthy" || handoffHealth === "degraded" || handoffHealth === "stalled";
   if (
     normalizedCapacity < 1 ||
     normalizedAdmissiblePending < 1 ||
     active < normalizedCapacity ||
     dispatcherState !== "active" ||
-    handoffHealth !== "healthy"
+    !knownHandoffState
   ) {
     return "idle";
   }

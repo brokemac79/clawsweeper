@@ -1551,6 +1551,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           QUEUE_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
+          CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS || '900' }}
         run: |
           limit() {
             pnpm --dir clawsweeper run --silent workflow -- limit "$1"
@@ -1559,9 +1560,32 @@ jobs:
             pnpm --dir clawsweeper run --silent workflow -- worker-limit "$@"
           }
           exact_review_queue_stats() {
-            local queue_url response
+            local queue_url response generated_at generated_epoch now_epoch queue_max_age_seconds age_seconds
             queue_url="${QUEUE_URL%/}"
             response="$(curl --fail --silent --connect-timeout 5 --max-time 10 "$queue_url/api/status" 2>/dev/null)" || return 1
+            generated_at="$(printf '%s' "$response" | jq -r '.exact_review_queue.generated_at // "" | if type == "string" then . else "" end' 2>/dev/null)" || return 1
+            if [ -z "$generated_at" ]; then
+              echo "::warning::Exact-review queue telemetry missing exact_review_queue.generated_at; using idle pressure (fail open)." >&2
+              return 1
+            fi
+            if ! generated_epoch="$(date -u -d "$generated_at" '+%s' 2>/dev/null)"; then
+              echo "::warning::Exact-review queue telemetry has invalid generated_at; using idle pressure (fail open)." >&2
+              return 1
+            fi
+            now_epoch="$(date -u '+%s')"
+            queue_max_age_seconds="${CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS:-900}"
+            if ! [[ "$queue_max_age_seconds" =~ ^[0-9]+$ ]] || [ "$queue_max_age_seconds" -lt 60 ]; then
+              queue_max_age_seconds=900
+            fi
+            age_seconds=$((now_epoch - generated_epoch))
+            if [ "$age_seconds" -gt "$queue_max_age_seconds" ]; then
+              echo "::warning::Exact-review queue telemetry snapshot is stale (generated_at=$generated_at, age_seconds=$age_seconds); using idle pressure (fail open)." >&2
+              return 1
+            fi
+            if [ "$age_seconds" -lt -300 ]; then
+              echo "::warning::Exact-review queue telemetry generated_at is too far in the future (generated_at=$generated_at); using idle pressure (fail open)." >&2
+              return 1
+            fi
             printf '%s' "$response" | jq -r '
               def count: if type == "number" and . >= 0 then floor else 0 end;
               [

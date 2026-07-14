@@ -329,6 +329,30 @@ test("exact-review queue pressure throttles only background review lanes", () =>
       dispatcherState: "active",
       handoffHealth: "stalled",
     }),
+    "saturated",
+  );
+  assert.equal(
+    exactReviewQueuePressure({
+      pending: 3,
+      admissiblePending: 3,
+      dispatching: 1,
+      leased: 27,
+      capacity: 28,
+      dispatcherState: "active",
+      handoffHealth: "degraded",
+    }),
+    "congested",
+  );
+  assert.equal(
+    exactReviewQueuePressure({
+      pending: 28,
+      admissiblePending: 28,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      dispatcherState: "active",
+      handoffHealth: "unknown",
+    }),
     "idle",
   );
 
