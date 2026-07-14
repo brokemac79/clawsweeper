@@ -112,7 +112,24 @@ The scheduler does this for background lanes:
 8. when that full queue has at least one queue-capacity worth of
    target-admissible pending work, cap broad lanes at
    `lanes.exact_review.background_saturated_max_workers`
-9. return at least 1 so an enabled lane can still make slow progress
+9. return zero when the exact-pressure cap is already consumed, so no further
+   broad worker is admitted until the current matrices drain
+
+The pressure cap is a shared residual allowance, not a fresh allowance for
+each concurrently planning background workflow. Existing broad review matrices
+are subtracted before calculating new intake; once the cap is already occupied,
+the scheduler defers new broad work until in-flight jobs drain. Sweep and
+commit-review planners share one broad-admission lock so concurrent snapshots
+cannot each claim the same allowance. Queued planners are held by that lock;
+only in-progress review matrices consume the live pressure allowance.
+Manual exact-review batches remain priority work and are never charged against
+that background allowance.
+An unexpanded commit-review planner reserves its configured, hard-capped page
+size until its review matrix is visible. A literal skipped matrix job identifies
+a completed zero-review plan so its report-publishing phase holds no reservation.
+When exact pressure consumes the allowance, commit review keeps the shared
+admission lock for a short delay and requeues the same commit range; it is
+deferred rather than marked reviewed or exhausted.
 
 The workflow reads the public queue snapshot before admitting normal review,
 hot intake, or commit-review work. A failed, stale, malformed, or unknown

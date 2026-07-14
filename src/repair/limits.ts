@@ -184,11 +184,16 @@ export function workerLimit(
   }
 
   function pressureLimitedBackground(limit: number): number {
-    if (exactReviewPressure === "saturated") {
-      return Math.min(limit, limits.exact_review.background_saturated_max_workers);
-    }
-    if (exactReviewPressure === "congested") {
-      return Math.min(limit, limits.exact_review.background_congested_max_workers);
+    const pressureCap =
+      exactReviewPressure === "saturated"
+        ? limits.exact_review.background_saturated_max_workers
+        : exactReviewPressure === "congested"
+          ? limits.exact_review.background_congested_max_workers
+          : undefined;
+    if (pressureCap !== undefined) {
+      // The pressure cap is shared by broad lanes. Once in-flight matrices use
+      // that allowance, admit no more background workers until capacity drains.
+      return Math.min(limit, Math.max(0, pressureCap - nonNegative(activeBackground)));
     }
     return limit;
   }
