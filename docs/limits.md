@@ -27,9 +27,10 @@ The mental model:
 - Assist has a small fixed cap because it is lightweight maintainer Q&A, not a
   derived review or repair lane.
 - Background lanes shrink when priority work is already active.
-- A healthy, active exact-review queue with target-admissible pending work
-  further reduces broad review work so its dispatchable backlog can recover
-  without competing for Codex, GitHub, or state-publish capacity.
+- The optional exact-review background-yield experiment can further reduce
+  broad review work while a healthy, active exact-review queue has
+  target-admissible pending work. It is disabled unless a maintainer sets
+  `CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD=1`.
 - Runtime overrides are escape hatches, not the normal tuning surface.
 
 ## Worker Budget
@@ -42,8 +43,8 @@ The mental model:
 | `workers.minimum_background`                          |      16 | Target floor for background progress when enough global capacity is available.                |
 | `lanes.exact_review.max_concurrent`                   |      64 | Maximum concurrent exact-item review workflow runs admitted to Codex.                         |
 | `lanes.exact_review.target_max_concurrent`            |      60 | Maximum concurrent exact-item review workflow runs one target repository may consume.         |
-| `lanes.exact_review.background_congested_max_workers` |      16 | Broad review cap while a healthy, full exact-review queue has target-admissible pending work. |
-| `lanes.exact_review.background_saturated_max_workers` |       4 | Broad review cap while a healthy, full queue has one lane's worth of admissible pending work. |
+| `lanes.exact_review.background_congested_max_workers` |      16 | Experimental broad-review cap while the explicit background-yield opt-in sees a healthy, full queue with admissible work. |
+| `lanes.exact_review.background_saturated_max_workers` |       4 | Experimental broad-review cap while the explicit background-yield opt-in sees one lane's worth of admissible work. |
 | `lanes.assist.max`                                    |      10 | Maximum concurrent lightweight assist jobs.                                                   |
 | `lanes.repair.cluster_max_live_runs`                  |       2 | Default live repair workflow cap for imported gitcrawl cluster dispatches.                    |
 
@@ -60,8 +61,8 @@ by default.
 | --------------------------------------------------- | ------: | ------------------------------------------------------------------------------------- |
 | `exact_review.concurrent_max`                       |      64 | Exact-item review admission cap, clamped to `workers.max`.                            |
 | `exact_review.target_concurrent_max`                |      60 | Exact-item per-target admission cap, clamped to global exact-review capacity.         |
-| `exact_review.background_congested_max_workers`     |      16 | Broad review worker cap for a healthy, full queue with admissible pending work.       |
-| `exact_review.background_saturated_max_workers`     |       4 | Broad review worker cap for a healthy, full queue with one lane's worth admissible.   |
+| `exact_review.background_congested_max_workers`     |      16 | Experimental broad-review cap for a healthy, full queue with admissible work.         |
+| `exact_review.background_saturated_max_workers`     |       4 | Experimental broad-review cap for a healthy, full queue with one lane's worth of work. |
 | `assist.default`                                    |      10 | Maintainer assist job cap.                                                            |
 | `review_shards.normal_default`                      |      89 | Quiet-system normal review shard ceiling.                                             |
 | `review_shards.normal_active_floor`                 |      38 | Minimum active normal review shards to keep queued for `openclaw/openclaw`.           |

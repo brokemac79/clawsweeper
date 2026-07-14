@@ -1435,9 +1435,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      # Broad sweep and commit-review plans share this global admission lock.
-      # Exact items use an individual run group and remain independently admitted.
-      group: ${{ format('clawsweeper-review-admission-{0}', (github.event.client_payload.item_number || github.event.client_payload.item_numbers || github.event.inputs.item_number || github.event.inputs.item_numbers) && github.run_id || 'background') }}
+      # The shared background-admission lock is an opt-in experiment. With the
+      # variable unset, preserve the current-main per-target planner grouping.
+      group: ${{ (github.event.client_payload.item_number || github.event.client_payload.item_numbers || github.event.inputs.item_number || github.event.inputs.item_numbers) && format('clawsweeper-review-admission-{0}', github.run_id) || vars.CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD == '1' && 'clawsweeper-review-admission-background' || format('clawsweeper-planner-{0}', (github.event_name == 'repository_dispatch' && github.event.client_payload.target_repo) || ((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.item_number == '' && github.event.inputs.item_numbers == '')) && (github.event.inputs.target_repo || ((github.event.schedule == '2/5 * * * *' || github.event.schedule == '22 * * * *') && 'openclaw/clawhub' || 'openclaw/openclaw'))) || github.run_id) }}
       cancel-in-progress: false
       queue: max
     outputs:
@@ -1556,6 +1556,7 @@ jobs:
           COMMIT_REVIEW_PAGE_SIZE: ${{ vars.CLAWSWEEPER_COMMIT_REVIEW_PAGE_SIZE || '' }}
           QUEUE_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
           CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_MAX_AGE_SECONDS || '900' }}
+          EXACT_REVIEW_BACKGROUND_YIELD_ENABLED: ${{ vars.CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD || '0' }}
         run: |
           limit() {
             pnpm --dir clawsweeper run --silent workflow -- limit "$1"
@@ -1789,17 +1790,19 @@ jobs:
           exact_review_capacity=0
           exact_review_dispatcher_state="unknown"
           exact_review_handoff_health="unknown"
-          if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_admissible_pending exact_review_dispatching exact_review_leased exact_review_capacity exact_review_dispatcher_state exact_review_handoff_health <<< "$exact_review_stats"; then
-            exact_review_pressure="$(pnpm --dir clawsweeper run --silent workflow -- exact-review-pressure \
-              --pending "$exact_review_pending" \
-              --admissible-pending "$exact_review_admissible_pending" \
-              --dispatching "$exact_review_dispatching" \
-              --leased "$exact_review_leased" \
-              --capacity "$exact_review_capacity" \
-              --dispatcher-state "$exact_review_dispatcher_state" \
-              --handoff-health "$exact_review_handoff_health")" || exact_review_pressure="idle"
-          else
-            echo "::warning::Exact-review queue telemetry was unavailable; using idle pressure (fail open)."
+          if [ "$EXACT_REVIEW_BACKGROUND_YIELD_ENABLED" = "1" ]; then
+            if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_admissible_pending exact_review_dispatching exact_review_leased exact_review_capacity exact_review_dispatcher_state exact_review_handoff_health <<< "$exact_review_stats"; then
+              exact_review_pressure="$(pnpm --dir clawsweeper run --silent workflow -- exact-review-pressure \
+                --pending "$exact_review_pending" \
+                --admissible-pending "$exact_review_admissible_pending" \
+                --dispatching "$exact_review_dispatching" \
+                --leased "$exact_review_leased" \
+                --capacity "$exact_review_capacity" \
+                --dispatcher-state "$exact_review_dispatcher_state" \
+                --handoff-health "$exact_review_handoff_health")" || exact_review_pressure="idle"
+            else
+              echo "::warning::Exact-review queue telemetry was unavailable; using idle pressure (fail open)."
+            fi
           fi
           active_critical_workers="$(( $(active_run_count ".github/workflows/repair-cluster-worker.yml") + $(active_sweep_exact_workers) ))"
           active_background_workers="$(( $(active_commit_review_workers) + $(active_sweep_background_workers) ))"

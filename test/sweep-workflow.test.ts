@@ -2229,6 +2229,14 @@ test("background review schedulers yield to a saturated exact-review queue", () 
   );
 
   for (const block of [sweepBlock, commitBlock]) {
+    assert.match(
+      block,
+      /EXACT_REVIEW_BACKGROUND_YIELD_ENABLED: \$\{\{ vars\.CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD \|\| '0' \}\}/,
+    );
+    assert.match(
+      block,
+      /if \[ "\$EXACT_REVIEW_BACKGROUND_YIELD_ENABLED" = "1" \]; then\s+if exact_review_stats=/,
+    );
     assert.match(block, /QUEUE_URL: \$\{\{ vars\.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL/);
     assert.match(
       block,
@@ -2356,7 +2364,7 @@ test("review backstops identify sweep runs by stable workflow path", () => {
   assert.doesNotMatch(block, /run\.workflowName/);
 });
 
-test("broad review planners serialize admission without delaying exact planners", () => {
+test("background-yield admission is opt-in and keeps exact planners independent", () => {
   const workflow = readText(".github/workflows/sweep.yml");
   const concurrencyBlock = workflow.slice(
     workflow.indexOf("concurrency:"),
@@ -2385,13 +2393,25 @@ test("broad review planners serialize admission without delaying exact planners"
   assert.match(concurrencyBlock, /format\('clawsweeper-comment-sync-\{0\}', github\.run_id\)/);
   assert.match(concurrencyBlock, /format\('clawsweeper-apply-\{0\}', github\.run_id\)/);
   assert.doesNotMatch(concurrencyBlock, /queue: max/);
-  assert.match(planHeader, /group: \$\{\{ format\('clawsweeper-review-admission-\{0\}'/);
+  assert.match(planHeader, /format\('clawsweeper-review-admission-\{0\}', github\.run_id\)/);
   assert.match(planHeader, /github\.event\.client_payload\.item_number/);
   assert.match(planHeader, /github\.event\.client_payload\.item_numbers/);
   assert.match(planHeader, /github\.event\.inputs\.item_number/);
   assert.match(planHeader, /github\.event\.inputs\.item_numbers/);
-  assert.match(planHeader, /&& github\.run_id \|\| 'background'/);
-  assert.match(commitPlanHeader, /group: clawsweeper-review-admission-background/);
+  assert.match(
+    planHeader,
+    /vars\.CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD == '1' && 'clawsweeper-review-admission-background'/,
+  );
+  assert.match(planHeader, /format\('clawsweeper-planner-\{0\}'/);
+  assert.match(
+    planHeader,
+    /github\.event_name == 'repository_dispatch' && github\.event\.client_payload\.target_repo/,
+  );
+  assert.match(
+    commitPlanHeader,
+    /vars\.CLAWSWEEPER_ENABLE_EXACT_REVIEW_BACKGROUND_YIELD == '1' && 'clawsweeper-review-admission-background'/,
+  );
+  assert.match(commitPlanHeader, /format\('commit-review-plan-\{0\}', github\.run_id\)/);
   assert.match(planHeader, /queue: max/);
   assert.match(planHeader, /cancel-in-progress: false/);
   assert.match(commitPlanHeader, /queue: max/);
