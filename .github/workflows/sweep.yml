@@ -1710,13 +1710,15 @@ jobs:
               --dispatching "$exact_review_dispatching" \
               --leased "$exact_review_leased" \
               --capacity "$exact_review_capacity")" || exact_review_pressure="idle"
+          else
+            echo "::warning::Exact-review queue telemetry was unavailable; using idle pressure (fail open)."
           fi
           active_critical_workers="$(( $(active_run_count ".github/workflows/repair-cluster-worker.yml") + $(active_sweep_exact_workers) ))"
           active_background_workers="$(( $(active_run_count ".github/workflows/commit-review.yml") * commit_page_size + $(active_sweep_background_workers) ))"
           hot_intake_shards="$(worker_limit hot_intake --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
           normal_shards="$(worker_limit normal_review --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
           if [ "$exact_review_pressure" != "idle" ]; then
-            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling broad review intake."
+            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling broad review intake to normal=$normal_shards and hot=$hot_intake_shards."
           fi
           hot_intake="${{ ((github.event_name == 'repository_dispatch' && github.event.client_payload.hot_intake == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.hot_intake == 'true') || (github.event_name == 'schedule' && (github.event.schedule == '*/5 * * * *' || github.event.schedule == '2/5 * * * *'))) && 'true' || 'false' }}"
           exact_item="${{ github.event.client_payload.item_number || github.event.inputs.item_number || github.event.inputs.item_numbers || '' }}"

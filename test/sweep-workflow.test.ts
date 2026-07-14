@@ -2136,6 +2136,7 @@ test("background review schedulers yield to a saturated exact-review queue", () 
     assert.match(block, /\$queue_url\/api\/status/);
     assert.match(block, /exact-review-pressure/);
     assert.match(block, /--exact-review-pressure "\$exact_review_pressure"/);
+    assert.match(block, /queue telemetry was unavailable; using idle pressure \(fail open\)/);
     assert.match(block, /throttling .*review intake/);
   }
   assert.match(sweepBlock, /worker_limit hot_intake.*--exact-review-pressure/);
@@ -2146,6 +2147,11 @@ test("background review schedulers yield to a saturated exact-review queue", () 
     /elif \[ "\$exact_review_pressure" != "idle" \] && \[\[ "\$PAGE_SIZE" =~ \^\[0-9\]\+\$ \]\]/,
   );
   assert.match(commitBlock, /Capping commit-review page size/);
+  assert.match(commitBlock, /throttling commit review intake to page_size=\$PAGE_SIZE/);
+  assert.match(
+    sweepBlock,
+    /throttling broad review intake to normal=\$normal_shards and hot=\$hot_intake_shards/,
+  );
 });
 
 test("review backstops identify sweep runs by stable workflow path", () => {

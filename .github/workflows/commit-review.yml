@@ -279,6 +279,8 @@ jobs:
               --dispatching "$exact_review_dispatching" \
               --leased "$exact_review_leased" \
               --capacity "$exact_review_capacity")" || exact_review_pressure="idle"
+          else
+            echo "::warning::Exact-review queue telemetry was unavailable; using idle pressure (fail open)."
           fi
           scheduler_page_size="$(pnpm --dir clawsweeper run --silent workflow -- worker-limit commit_review --active-critical "$active_critical_workers" --active-background "$active_background_workers" --exact-review-pressure "$exact_review_pressure")"
           if [ -z "$PAGE_SIZE" ]; then
@@ -288,7 +290,7 @@ jobs:
             PAGE_SIZE="$scheduler_page_size"
           fi
           if [ "$exact_review_pressure" != "idle" ]; then
-            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling commit review intake."
+            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling commit review intake to page_size=$PAGE_SIZE."
           fi
           page_size_hard_cap="$(pnpm --dir clawsweeper run --silent workflow -- limit commit_review.page_size_hard_cap)"
           if [ "$ENABLED" = "false" ]; then
