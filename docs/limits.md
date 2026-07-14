@@ -34,18 +34,18 @@ The mental model:
 
 ## Worker Budget
 
-| Name                                       | Current | Meaning                                                                               |
-| ------------------------------------------ | ------: | ------------------------------------------------------------------------------------- |
-| `workers.max`                              |     128 | Maximum global Codex worker budget used to derive lane limits.                        |
-| `workers.reserve_for_interactive`          |      16 | Worker slots background lanes leave open for exact/manual/urgent work.                |
-| `workers.expansion_reserve`                |       8 | Extra slots background lanes leave open for independently planned matrix expansion.   |
-| `workers.minimum_background`               |      16 | Target floor for background progress when enough global capacity is available.        |
-| `lanes.exact_review.max_concurrent`        |      64 | Maximum concurrent exact-item review workflow runs admitted to Codex.                 |
-| `lanes.exact_review.target_max_concurrent` |      60 | Maximum concurrent exact-item review workflow runs one target repository may consume. |
-| `lanes.exact_review.background_congested_max_workers` | 16 | Broad review cap while every exact-review slot is active and work is waiting. |
-| `lanes.exact_review.background_saturated_max_workers` | 4 | Broad review cap while every exact-review slot is active and at least one full lane is waiting. |
-| `lanes.assist.max`                         |      10 | Maximum concurrent lightweight assist jobs.                                           |
-| `lanes.repair.cluster_max_live_runs`       |       2 | Default live repair workflow cap for imported gitcrawl cluster dispatches.            |
+| Name                                                  | Current | Meaning                                                                                         |
+| ----------------------------------------------------- | ------: | ----------------------------------------------------------------------------------------------- |
+| `workers.max`                                         |     128 | Maximum global Codex worker budget used to derive lane limits.                                  |
+| `workers.reserve_for_interactive`                     |      16 | Worker slots background lanes leave open for exact/manual/urgent work.                          |
+| `workers.expansion_reserve`                           |       8 | Extra slots background lanes leave open for independently planned matrix expansion.             |
+| `workers.minimum_background`                          |      16 | Target floor for background progress when enough global capacity is available.                  |
+| `lanes.exact_review.max_concurrent`                   |      64 | Maximum concurrent exact-item review workflow runs admitted to Codex.                           |
+| `lanes.exact_review.target_max_concurrent`            |      60 | Maximum concurrent exact-item review workflow runs one target repository may consume.           |
+| `lanes.exact_review.background_congested_max_workers` |      16 | Broad review cap while every exact-review slot is active and work is waiting.                   |
+| `lanes.exact_review.background_saturated_max_workers` |       4 | Broad review cap while every exact-review slot is active and at least one full lane is waiting. |
+| `lanes.assist.max`                                    |      10 | Maximum concurrent lightweight assist jobs.                                                     |
+| `lanes.repair.cluster_max_live_runs`                  |       2 | Default live repair workflow cap for imported gitcrawl cluster dispatches.                      |
 
 ## Derived Limits
 
