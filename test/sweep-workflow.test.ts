@@ -2134,8 +2134,14 @@ test("background review schedulers yield to a saturated exact-review queue", () 
     assert.match(block, /QUEUE_URL: \$\{\{ vars\.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL/);
     assert.match(block, /exact_review_queue_stats\(\)/);
     assert.match(block, /\$queue_url\/api\/status/);
+    assert.match(block, /admissible_pending/);
+    assert.match(block, /dispatcher\.state/);
+    assert.match(block, /handoff_health\.status/);
     assert.match(block, /exact-review-pressure/);
     assert.match(block, /--exact-review-pressure "\$exact_review_pressure"/);
+    assert.match(block, /--admissible-pending "\$exact_review_admissible_pending"/);
+    assert.match(block, /--dispatcher-state "\$exact_review_dispatcher_state"/);
+    assert.match(block, /--handoff-health "\$exact_review_handoff_health"/);
     assert.match(block, /queue telemetry was unavailable; using idle pressure \(fail open\)/);
     assert.match(block, /throttling .*review intake/);
   }

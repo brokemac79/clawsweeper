@@ -2773,8 +2773,19 @@ function exactReviewQueueStats(
         left.target_repo.localeCompare(right.target_repo),
     );
   const nextWakeAt = exactReviewQueueNextWakeAt(state, now, capacity, targetCapacity);
+  const readyPending = items.filter(
+    (item) => item.state === "pending" && item.nextAttemptAt <= now,
+  ).length;
+  const admissiblePending = exactReviewQueueAdmittedItems(
+    state,
+    now,
+    Number.MAX_SAFE_INTEGER,
+    targetCapacity,
+  ).length;
   return {
     pending: handoffHealth.phases.pending.count,
+    ready_pending: readyPending,
+    admissible_pending: admissiblePending,
     dispatching: handoffHealth.phases.dispatching.count,
     leased: handoffHealth.phases.leased.count,
     oldest_pending_at: handoffHealth.phases.pending.oldest_at,

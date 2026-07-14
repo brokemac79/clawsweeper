@@ -285,9 +285,12 @@ function runCli(): void {
       process.stdout.write(
         exactReviewQueuePressure({
           pending: nonNegativeIntegerArg("pending"),
+          admissiblePending: nonNegativeIntegerArg("admissible-pending"),
           dispatching: nonNegativeIntegerArg("dispatching"),
           leased: nonNegativeIntegerArg("leased"),
           capacity: nonNegativeIntegerArg("capacity"),
+          dispatcherState: requiredString("dispatcher-state"),
+          handoffHealth: requiredString("handoff-health"),
         }),
       );
       break;

@@ -196,22 +196,35 @@ export function workerLimit(
 
 export function exactReviewQueuePressure({
   pending,
+  admissiblePending,
   dispatching,
   leased,
   capacity,
+  dispatcherState,
+  handoffHealth,
 }: {
   pending: number;
+  admissiblePending: number;
   dispatching: number;
   leased: number;
   capacity: number;
+  dispatcherState: string;
+  handoffHealth: string;
 }): ExactReviewQueuePressure {
   const normalizedCapacity = nonNegative(capacity);
   const active = nonNegative(dispatching) + nonNegative(leased);
   const normalizedPending = nonNegative(pending);
-  if (normalizedCapacity < 1 || normalizedPending < 1 || active < normalizedCapacity) {
+  const normalizedAdmissiblePending = Math.min(normalizedPending, nonNegative(admissiblePending));
+  if (
+    normalizedCapacity < 1 ||
+    normalizedAdmissiblePending < 1 ||
+    active < normalizedCapacity ||
+    dispatcherState !== "active" ||
+    handoffHealth !== "healthy"
+  ) {
     return "idle";
   }
-  return normalizedPending >= normalizedCapacity ? "saturated" : "congested";
+  return normalizedAdmissiblePending >= normalizedCapacity ? "saturated" : "congested";
 }
 
 function validateWorkerConfig(value: unknown): WorkerConfig {

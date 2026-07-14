@@ -192,9 +192,12 @@ jobs:
               def count: if type == "number" and . >= 0 then floor else 0 end;
               [
                 (.exact_review_queue.pending // 0 | count),
+                (.exact_review_queue.admissible_pending // 0 | count),
                 (.exact_review_queue.dispatching // 0 | count),
                 (.exact_review_queue.leased // 0 | count),
-                (.exact_review_queue.handoff_health.capacity // 0 | count)
+                (.exact_review_queue.handoff_health.capacity // 0 | count),
+                (.exact_review_queue.dispatcher.state // "" | if type == "string" then . else "" end),
+                (.exact_review_queue.handoff_health.status // "" | if type == "string" then . else "" end)
               ] | @tsv
             ' 2>/dev/null
           }
@@ -270,15 +273,21 @@ jobs:
           active_background_workers="$(active_sweep_background_workers)"
           exact_review_pressure="idle"
           exact_review_pending=0
+          exact_review_admissible_pending=0
           exact_review_dispatching=0
           exact_review_leased=0
           exact_review_capacity=0
-          if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_dispatching exact_review_leased exact_review_capacity <<< "$exact_review_stats"; then
+          exact_review_dispatcher_state="unknown"
+          exact_review_handoff_health="unknown"
+          if exact_review_stats="$(exact_review_queue_stats)" && IFS=$'\t' read -r exact_review_pending exact_review_admissible_pending exact_review_dispatching exact_review_leased exact_review_capacity exact_review_dispatcher_state exact_review_handoff_health <<< "$exact_review_stats"; then
             exact_review_pressure="$(pnpm --dir clawsweeper run --silent workflow -- exact-review-pressure \
               --pending "$exact_review_pending" \
+              --admissible-pending "$exact_review_admissible_pending" \
               --dispatching "$exact_review_dispatching" \
               --leased "$exact_review_leased" \
-              --capacity "$exact_review_capacity")" || exact_review_pressure="idle"
+              --capacity "$exact_review_capacity" \
+              --dispatcher-state "$exact_review_dispatcher_state" \
+              --handoff-health "$exact_review_handoff_health")" || exact_review_pressure="idle"
           else
             echo "::warning::Exact-review queue telemetry was unavailable; using idle pressure (fail open)."
           fi
@@ -290,7 +299,7 @@ jobs:
             PAGE_SIZE="$scheduler_page_size"
           fi
           if [ "$exact_review_pressure" != "idle" ]; then
-            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity); throttling commit review intake to page_size=$PAGE_SIZE."
+            echo "::notice::Exact-review queue is $exact_review_pressure (pending=$exact_review_pending, admissible_pending=$exact_review_admissible_pending, dispatching=$exact_review_dispatching, leased=$exact_review_leased, capacity=$exact_review_capacity, dispatcher=$exact_review_dispatcher_state, handoff=$exact_review_handoff_health); throttling commit review intake to page_size=$PAGE_SIZE."
           fi
           page_size_hard_cap="$(pnpm --dir clawsweeper run --silent workflow -- limit commit_review.page_size_hard_cap)"
           if [ "$ENABLED" = "false" ]; then

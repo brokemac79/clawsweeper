@@ -35,7 +35,8 @@ test("exact-review queue defaults to 64 of the 128 global workers", () => {
 });
 
 test("dashboard status reads the exact-review handoff model from the durable queue", async () => {
-  const queue = new ExactReviewQueue({ storage: new MemoryDurableStorage() }, {});
+  const storage = new MemoryDurableStorage();
+  const queue = new ExactReviewQueue({ storage }, {});
   await queue.fetch(buildExactReviewQueueRequest("handoff-status", 597, "opened"));
 
   const status = await exactReviewQueueStatusSnapshot({
@@ -44,11 +45,55 @@ test("dashboard status reads the exact-review handoff model from the durable que
 
   assert.ok(status);
   assert.equal(status.pending, 1);
+  assert.equal(status.ready_pending, 1);
+  assert.equal(status.admissible_pending, 1);
   assert.equal(status.dispatching, 0);
   assert.equal(status.leased, 0);
   assert.equal(status.handoff_health.status, "healthy");
   assert.equal(status.handoff_health.phases.pending.count, 1);
   assert.equal(await exactReviewQueueStatusSnapshot({}), null);
+});
+
+test("dashboard status excludes retry-delayed exact reviews from ready pending", async () => {
+  const storage = new MemoryDurableStorage();
+  const queue = new ExactReviewQueue({ storage }, {});
+  await queue.fetch(buildExactReviewQueueRequest("delayed-status", 598, "opened"));
+  const state = (await storage.get("exact-review-queue")) as {
+    items: Record<string, { nextAttemptAt: number }>;
+  };
+  state.items["openclaw/gogcli#598"].nextAttemptAt = Date.now() + 60_000;
+  await storage.put("exact-review-queue", state);
+
+  const status = await exactReviewQueueStatusSnapshot({
+    EXACT_REVIEW_QUEUE: new MemoryDurableNamespace(queue),
+  });
+
+  assert.ok(status);
+  assert.equal(status.pending, 1);
+  assert.equal(status.ready_pending, 0);
+  assert.equal(status.admissible_pending, 0);
+});
+
+test("dashboard status excludes ready reviews blocked by a target exact-review cap", async () => {
+  const storage = new MemoryDurableStorage();
+  const queue = new ExactReviewQueue({ storage }, { EXACT_REVIEW_TARGET_MAX_CONCURRENT: "1" });
+  await queue.fetch(
+    buildExactReviewQueueRequest("target-cap-status", 599, "opened", "issue", "openclaw/openclaw"),
+  );
+  const state = (await storage.get("exact-review-queue")) as {
+    items: Record<string, ReturnType<typeof leasedExactReviewQueueItem>>;
+  };
+  state.items["openclaw/openclaw#600"] = leasedExactReviewQueueItem(600, "run-600");
+  await storage.put("exact-review-queue", state);
+
+  const status = await exactReviewQueueStatusSnapshot({
+    EXACT_REVIEW_QUEUE: new MemoryDurableNamespace(queue),
+  });
+
+  assert.ok(status);
+  assert.equal(status.pending, 1);
+  assert.equal(status.ready_pending, 1);
+  assert.equal(status.admissible_pending, 0);
 });
 
 test("triage routing groups classify impact labels without forcing one primary group", () => {

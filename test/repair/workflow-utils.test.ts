@@ -251,21 +251,85 @@ test("worker scheduler keeps 104 slots available for steady background work", ()
 });
 
 test("exact-review queue pressure throttles only background review lanes", () => {
+  const healthyDispatcher = { dispatcherState: "active", handoffHealth: "healthy" };
   assert.equal(
-    exactReviewQueuePressure({ pending: 0, dispatching: 0, leased: 28, capacity: 28 }),
+    exactReviewQueuePressure({
+      pending: 0,
+      admissiblePending: 0,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      ...healthyDispatcher,
+    }),
     "idle",
   );
   assert.equal(
-    exactReviewQueuePressure({ pending: 1, dispatching: 0, leased: 27, capacity: 28 }),
+    exactReviewQueuePressure({
+      pending: 1,
+      admissiblePending: 1,
+      dispatching: 0,
+      leased: 27,
+      capacity: 28,
+      ...healthyDispatcher,
+    }),
     "idle",
   );
   assert.equal(
-    exactReviewQueuePressure({ pending: 3, dispatching: 1, leased: 27, capacity: 28 }),
+    exactReviewQueuePressure({
+      pending: 3,
+      admissiblePending: 3,
+      dispatching: 1,
+      leased: 27,
+      capacity: 28,
+      ...healthyDispatcher,
+    }),
     "congested",
   );
   assert.equal(
-    exactReviewQueuePressure({ pending: 28, dispatching: 0, leased: 28, capacity: 28 }),
+    exactReviewQueuePressure({
+      pending: 28,
+      admissiblePending: 28,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      ...healthyDispatcher,
+    }),
     "saturated",
+  );
+  assert.equal(
+    exactReviewQueuePressure({
+      pending: 28,
+      admissiblePending: 0,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      ...healthyDispatcher,
+    }),
+    "idle",
+  );
+  assert.equal(
+    exactReviewQueuePressure({
+      pending: 28,
+      admissiblePending: 28,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      dispatcherState: "paused",
+      handoffHealth: "healthy",
+    }),
+    "idle",
+  );
+  assert.equal(
+    exactReviewQueuePressure({
+      pending: 28,
+      admissiblePending: 28,
+      dispatching: 0,
+      leased: 28,
+      capacity: 28,
+      dispatcherState: "active",
+      handoffHealth: "stalled",
+    }),
+    "idle",
   );
 
   assert.equal(
@@ -294,12 +358,18 @@ test("workflow utility CLI classifies exact-review queue pressure", () => {
       "exact-review-pressure",
       "--pending",
       "28",
+      "--admissible-pending",
+      "28",
       "--dispatching",
       "0",
       "--leased",
       "28",
       "--capacity",
       "28",
+      "--dispatcher-state",
+      "active",
+      "--handoff-health",
+      "healthy",
     ],
     { cwd: process.cwd(), encoding: "utf8" },
   );

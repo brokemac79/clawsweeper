@@ -218,9 +218,13 @@ workflow state, check time, and retry time so an intentional pause cannot look
 like occupied executor capacity. Re-enabling the workflow does not require a
 queue mutation; the next status check resumes normal admission.
 
-The same endpoint exposes `handoff_health` plus oldest timestamps and ages for
-the pending, dispatching, and leased phases. New dispatch and claim transitions
-carry explicit phase timestamps. Rows written by an older deployment derive
+The same endpoint exposes `ready_pending`, `admissible_pending`, `handoff_health`,
+and oldest timestamps and ages for the pending, dispatching, and leased phases.
+`ready_pending` excludes retry-delayed queue entries; `admissible_pending` further
+excludes work blocked by its target's exact-review cap, so schedulers can distinguish
+actionable backlog from work deliberately waiting for retry or target capacity. New
+dispatch and claim transitions carry explicit phase timestamps. Rows written by an
+older deployment derive
 their phase start from the active dispatch or execution lease; a stale timestamp
 left by a rollback cannot override that newer lease, and a wholly unknown legacy
 age stays non-alarming. A claim is degraded after one third of the dispatch
