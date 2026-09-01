@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import {
   discoverWorkerRecordRepoSlugs,
+  downloadWorkerSnapshot,
   exportWorkerRecords,
   fetchWorkerCanonicalItemIds,
   fetchWorkerStoredSnapshot,
@@ -33,11 +39,15 @@ function fetchStub(responses: Array<Response | Error>) {
 
 function captureRetryDelays(t: TestContext) {
   const delays: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
   const immediateSetTimeout = (
     callback: (...args: unknown[]) => void,
     delay?: number,
     ...args: unknown[]
   ) => {
+    if (![250, 500, 60_000, 180_000].includes(Number(delay))) {
+      return originalSetTimeout(callback, delay, ...args);
+    }
     delays.push(Number(delay));
     queueMicrotask(() => callback(...args));
     return 0 as unknown as ReturnType<typeof setTimeout>;
@@ -45,6 +55,69 @@ function captureRetryDelays(t: TestContext) {
   t.mock.method(globalThis, "setTimeout", immediateSetTimeout as typeof setTimeout);
   return delays;
 }
+
+test("canonical record export recovers through a signed loopback HTTP transport", async (t) => {
+  const requests: Array<{
+    body: string;
+    method: string | undefined;
+    path: string;
+    signature: string;
+  }> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push({
+      body: Buffer.concat(chunks).toString("utf8"),
+      method: request.method,
+      path: request.url ?? "",
+      signature: String(request.headers["x-clawsweeper-exact-review-signature"] ?? ""),
+    });
+    response.setHeader("content-type", "application/json");
+    if (requests.length === 1) {
+      response.statusCode = 500;
+      response.end(JSON.stringify({ error: "exact_review_queue_unavailable" }));
+      return;
+    }
+    response.statusCode = 200;
+    response.end(
+      JSON.stringify({
+        repoSlug: "openclaw-openclaw",
+        revision: 7,
+        records: [],
+        nextCursor: null,
+      }),
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const delays = captureRetryDelays(t);
+
+  const snapshot = await exportWorkerRecords({
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    webhookSecret,
+    repoSlug: "openclaw-openclaw",
+  });
+
+  assert.equal(snapshot.revision, 7);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(delays, [60_000]);
+  for (const request of requests) {
+    assert.equal(request.method, "POST");
+    assert.equal(request.path, "/internal/state/records/export");
+    assert.equal(
+      request.signature,
+      `sha256=${createHmac("sha256", webhookSecret).update(request.body).digest("hex")}`,
+    );
+  }
+});
 
 test("signedPost surfaces status and error code from a non-OK response without cloning", async () => {
   const { calls, fetchImpl } = fetchStub([jsonResponse(422, { error: "invalid_repo" })]);
@@ -367,6 +440,46 @@ test("stored-snapshot reads remain fail-closed after the long retry budget", asy
   );
   assert.equal(calls.length, 3);
   assert.deepEqual(delays, [60_000, 180_000]);
+});
+
+test("snapshot chunks retry malformed successful responses within the shared budget", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-snapshot-chunk-retry-"));
+  t.after(() => rmSync(root, { force: true, recursive: true }));
+  const archivePath = join(root, "snapshot.tar.gz");
+  const bytes = Buffer.from("snapshot-bytes");
+  const expectedRange = `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`;
+  const malformedStatus = new Response(bytes, { status: 200 });
+  const malformedRange = new Response(bytes, {
+    status: 206,
+    headers: { "content-range": `bytes 1-${bytes.byteLength}/${bytes.byteLength}` },
+  });
+  const valid = new Response(bytes, {
+    status: 206,
+    headers: { "content-range": expectedRange },
+  });
+  const { calls, fetchImpl } = fetchStub([malformedStatus, malformedRange, valid]);
+  const delays = captureRetryDelays(t);
+
+  await downloadWorkerSnapshot({
+    archivePath,
+    baseUrl,
+    webhookSecret,
+    snapshot: {
+      repoSlug: "openclaw-openclaw",
+      revisionWatermark: 7,
+      objectKey: "records/openclaw-openclaw/7.tar.gz",
+      bytes: bytes.byteLength,
+      uncompressedBytes: bytes.byteLength,
+      fileCount: 0,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      access: { mode: "worker_range_proxy", maxChunkBytes: bytes.byteLength },
+    },
+    fetch: fetchImpl,
+  });
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(readFileSync(archivePath), bytes);
 });
 
 test("slug discovery retries malformed repository entries", async (t) => {

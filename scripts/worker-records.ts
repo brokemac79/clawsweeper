@@ -788,7 +788,7 @@ async function ensureSnapshotCache(options: {
   const temporaryTree = path.join(temporaryRoot, "tree");
   mkdirSync(temporaryTree, { recursive: true });
   try {
-    await downloadSnapshot({ ...options, archivePath });
+    await downloadWorkerSnapshot({ ...options, archivePath });
     const unpacked = spawnSync("tar", ["-xzf", archivePath, "-C", temporaryTree], {
       encoding: "utf8",
     });
@@ -841,7 +841,7 @@ function validSnapshotCache(
   }
 }
 
-async function downloadSnapshot(options: {
+export async function downloadWorkerSnapshot(options: {
   archivePath: string;
   baseUrl: string;
   webhookSecret: string;
@@ -856,40 +856,86 @@ async function downloadSnapshot(options: {
         options.snapshot.access.maxChunkBytes,
         options.snapshot.bytes - offset,
       );
-      const response = await signedRequest({
-        baseUrl: options.baseUrl,
-        path: "/internal/state/records/snapshots/chunk",
-        webhookSecret: options.webhookSecret,
-        body: {
-          repoSlug: options.snapshot.repoSlug,
-          revisionWatermark: options.snapshot.revisionWatermark,
-          offset,
-          length,
-        },
-        fetch: options.fetch,
-        retryDelaysMs: WORKER_RECORD_READ_RETRY_DELAYS_MS,
+      const bytes = await fetchWorkerSnapshotChunk({
+        ...options,
+        offset,
+        length,
       });
-      if (!response.ok) {
-        throw workerRequestError(response.status, await response.text().catch(() => ""));
-      }
-      if (response.status !== 206) {
-        throw new Error(`Worker snapshot chunk returned status ${response.status}`);
-      }
-      const expectedRange = `bytes ${offset}-${offset + length - 1}/${options.snapshot.bytes}`;
-      if (response.headers.get("content-range") !== expectedRange) {
-        throw new Error("Worker snapshot chunk returned an invalid content range");
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength !== length) {
-        throw new Error(
-          `Worker snapshot chunk length mismatch: expected ${length}, received ${bytes.byteLength}`,
-        );
-      }
       writeSync(descriptor, bytes);
       offset += bytes.byteLength;
     }
   } finally {
     closeSync(descriptor);
+  }
+}
+
+async function fetchWorkerSnapshotChunk(options: {
+  baseUrl: string;
+  webhookSecret: string;
+  snapshot: WorkerStoredSnapshot;
+  offset: number;
+  length: number;
+  fetch?: typeof globalThis.fetch;
+}) {
+  const expectedRange = `bytes ${options.offset}-${options.offset + options.length - 1}/${options.snapshot.bytes}`;
+  for (let attempt = 1; ; attempt += 1) {
+    let response: Response;
+    try {
+      response = await signedRequestWithMaxAttempts(
+        {
+          baseUrl: options.baseUrl,
+          path: "/internal/state/records/snapshots/chunk",
+          webhookSecret: options.webhookSecret,
+          body: {
+            repoSlug: options.snapshot.repoSlug,
+            revisionWatermark: options.snapshot.revisionWatermark,
+            offset: options.offset,
+            length: options.length,
+          },
+          fetch: options.fetch,
+          retryDelaysMs: WORKER_RECORD_READ_RETRY_DELAYS_MS,
+        },
+        1,
+      );
+    } catch (error) {
+      if (!(error instanceof RetryableSignedRequestError)) throw error;
+      if (attempt >= SIGNED_REQUEST_MAX_ATTEMPTS) throw error.cause;
+      await signedRequestBackoff(attempt, WORKER_RECORD_READ_RETRY_DELAYS_MS);
+      continue;
+    }
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
+      if (response.status >= 500 && attempt < SIGNED_REQUEST_MAX_ATTEMPTS) {
+        await signedRequestBackoff(attempt, WORKER_RECORD_READ_RETRY_DELAYS_MS);
+        continue;
+      }
+      throw workerRequestError(response.status, bodyText);
+    }
+
+    let bytes: Uint8Array | undefined;
+    let protocolError: Error | undefined;
+    if (response.status !== 206) {
+      protocolError = new Error(`Worker snapshot chunk returned status ${response.status}`);
+    } else if (response.headers.get("content-range") !== expectedRange) {
+      protocolError = new Error("Worker snapshot chunk returned an invalid content range");
+    } else {
+      try {
+        bytes = new Uint8Array(await response.arrayBuffer());
+      } catch (error) {
+        protocolError = error instanceof Error ? error : new Error(String(error));
+      }
+      if (bytes !== undefined && bytes.byteLength !== options.length) {
+        protocolError = new Error(
+          `Worker snapshot chunk length mismatch: expected ${options.length}, received ${bytes.byteLength}`,
+        );
+      }
+    }
+
+    if (protocolError === undefined && bytes !== undefined) return bytes;
+    await response.body?.cancel().catch(() => {});
+    if (attempt >= SIGNED_REQUEST_MAX_ATTEMPTS) throw protocolError;
+    await signedRequestBackoff(attempt, WORKER_RECORD_READ_RETRY_DELAYS_MS);
   }
 }
 
