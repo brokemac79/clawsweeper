@@ -45,7 +45,7 @@ function captureRetryDelays(t: TestContext) {
     delay?: number,
     ...args: unknown[]
   ) => {
-    if (![250, 500, 60_000, 180_000].includes(Number(delay))) {
+    if (![250, 500, 30_000, 60_000].includes(Number(delay))) {
       return originalSetTimeout(callback, delay, ...args);
     }
     delays.push(Number(delay));
@@ -108,7 +108,7 @@ test("canonical record export recovers through a signed loopback HTTP transport"
 
   assert.equal(snapshot.revision, 7);
   assert.equal(requests.length, 2);
-  assert.deepEqual(delays, [60_000]);
+  assert.deepEqual(delays, [30_000]);
   for (const request of requests) {
     assert.equal(request.method, "POST");
     assert.equal(request.path, "/internal/state/records/export");
@@ -321,7 +321,7 @@ test("exportWorkerRecords does not retry a deterministic 4xx", async (t) => {
   assert.deepEqual(delays, []);
 });
 
-test("exportWorkerRecords waits one minute then three minutes across eligible retries", async (t) => {
+test("exportWorkerRecords waits thirty seconds then one minute across eligible retries", async (t) => {
   const delays = captureRetryDelays(t);
   const { calls, fetchImpl } = fetchStub([
     jsonResponse(502, "<html>cloudflare 502</html>", "text/html"),
@@ -342,7 +342,7 @@ test("exportWorkerRecords waits one minute then three minutes across eligible re
   assert.equal(snapshot.revision, 7);
   assert.deepEqual(snapshot.records, []);
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("record reads share one three-attempt budget across 5xx and invalid 2xx failures", async (t) => {
@@ -365,7 +365,7 @@ test("record reads share one three-attempt budget across 5xx and invalid 2xx fai
   });
   assert.equal(snapshot.revision, 7);
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("record reads retry malformed endpoint envelopes, rows, and cursors", async (t) => {
@@ -398,7 +398,7 @@ test("record reads retry malformed endpoint envelopes, rows, and cursors", async
   });
   assert.equal(snapshot.revision, 7);
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("record reads surface pre-fetch configuration errors without long retries", async (t) => {
@@ -439,7 +439,7 @@ test("stored-snapshot reads remain fail-closed after the long retry budget", asy
     },
   );
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("snapshot chunks retry malformed successful responses within the shared budget", async (t) => {
@@ -478,7 +478,7 @@ test("snapshot chunks retry malformed successful responses within the shared bud
   });
 
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
   assert.deepEqual(readFileSync(archivePath), bytes);
 });
 
@@ -495,7 +495,7 @@ test("slug discovery retries malformed repository entries", async (t) => {
     [{ repoSlug: "openclaw-openclaw", revision: 12 }],
   );
   assert.equal(calls.length, 2);
-  assert.deepEqual(delays, [60_000]);
+  assert.deepEqual(delays, [30_000]);
 });
 
 test("canonical item listing retries malformed rows and inconsistent cursors", async (t) => {
@@ -530,7 +530,7 @@ test("canonical item listing retries malformed rows and inconsistent cursors", a
     [1],
   );
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("fetchWorkerCanonicalItemIds pages the exact coverage identity set", async () => {

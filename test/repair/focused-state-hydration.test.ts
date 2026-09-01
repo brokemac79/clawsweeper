@@ -307,7 +307,7 @@ test("single-issue hydration retries malformed successful edge responses", async
     fetch: fetchImpl as typeof fetch,
   });
   assert.equal(reads, 2);
-  assert.deepEqual(delays, [60_000]);
+  assert.deepEqual(delays, [30_000]);
   assert.equal(
     readFileSync(join(root, "records", repoSlug, "items", `${itemNumber}.md`), "utf8"),
     content,
@@ -346,7 +346,7 @@ test("single-issue hydration retries malformed Worker record envelopes", async (
       content,
     );
   }
-  assert.deepEqual(delays, [60_000, 60_000, 60_000, 60_000, 60_000]);
+  assert.deepEqual(delays, [30_000, 30_000, 30_000, 30_000, 30_000]);
 });
 
 test("single-issue hydration bounds repeated malformed Worker record envelopes", async (t) => {
@@ -368,7 +368,7 @@ test("single-issue hydration bounds repeated malformed Worker record envelopes",
     /invalid_json_body/,
   );
   assert.equal(reads, 3);
-  assert.deepEqual(delays, [60_000, 180_000]);
+  assert.deepEqual(delays, [30_000, 60_000]);
 });
 
 test("failed staged record installation restores the existing canonical record tree", async () => {

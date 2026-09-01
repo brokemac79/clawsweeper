@@ -118,7 +118,7 @@ export class WorkerRecordRequestError extends Error {
 type SignedRequestRetryDelays = readonly [number, number];
 
 const DEFAULT_SIGNED_REQUEST_RETRY_DELAYS_MS = [250, 500] as const;
-const WORKER_RECORD_READ_RETRY_DELAYS_MS = [60_000, 180_000] as const;
+const WORKER_RECORD_READ_RETRY_DELAYS_MS = [30_000, 60_000] as const;
 
 type SignedRequestOptions = {
   baseUrl: string;
