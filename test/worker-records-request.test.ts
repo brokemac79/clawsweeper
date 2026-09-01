@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
+  discoverWorkerRecordRepoSlugs,
   exportWorkerRecords,
   fetchWorkerCanonicalItemIds,
+  fetchWorkerStoredSnapshot,
   signedPost,
 } from "../scripts/worker-records.ts";
 
@@ -27,6 +29,21 @@ function fetchStub(responses: Array<Response | Error>) {
     return next;
   };
   return { calls, fetchImpl };
+}
+
+function captureRetryDelays(t: TestContext) {
+  const delays: number[] = [];
+  const immediateSetTimeout = (
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    delays.push(Number(delay));
+    queueMicrotask(() => callback(...args));
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  };
+  t.mock.method(globalThis, "setTimeout", immediateSetTimeout as typeof setTimeout);
+  return delays;
 }
 
 test("signedPost surfaces status and error code from a non-OK response without cloning", async () => {
@@ -157,7 +174,8 @@ test("signedPost resends the full JSON request body on a retry after a 502", asy
   assert.equal(bodies[1], bodies[0], "retry must resend an identical body payload");
 });
 
-test("signedPost retries 5xx responses and succeeds within the attempt budget", async () => {
+test("signedPost keeps the short retry schedule for callers outside record reads", async (t) => {
+  const delays = captureRetryDelays(t);
   const { calls, fetchImpl } = fetchStub([
     jsonResponse(502, "<html>bad gateway</html>", "text/html"),
     jsonResponse(502, { error: "upstream_unavailable" }),
@@ -172,6 +190,7 @@ test("signedPost retries 5xx responses and succeeds within the attempt budget", 
   });
   assert.deepEqual(value, { ok: true });
   assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [250, 500]);
 });
 
 test("signedPost surfaces the final 5xx after exhausting retries", async () => {
@@ -208,7 +227,8 @@ test("signedPost retries network errors and succeeds", async () => {
   assert.equal(calls.length, 2);
 });
 
-test("exportWorkerRecords surfaces the worker error code for a consumed-body failure", async () => {
+test("exportWorkerRecords does not retry a deterministic 4xx", async (t) => {
+  const delays = captureRetryDelays(t);
   const { calls, fetchImpl } = fetchStub([jsonResponse(409, { error: "revision_conflict" })]);
   await assert.rejects(
     exportWorkerRecords({
@@ -225,11 +245,14 @@ test("exportWorkerRecords surfaces the worker error code for a consumed-body fai
     },
   );
   assert.equal(calls.length, 1);
+  assert.deepEqual(delays, []);
 });
 
-test("exportWorkerRecords rides out a transient 502 during export", async () => {
+test("exportWorkerRecords waits one minute then three minutes across eligible retries", async (t) => {
+  const delays = captureRetryDelays(t);
   const { calls, fetchImpl } = fetchStub([
     jsonResponse(502, "<html>cloudflare 502</html>", "text/html"),
+    jsonResponse(500, { error: "exact_review_queue_unavailable" }),
     jsonResponse(200, {
       repoSlug: "openclaw-openclaw",
       revision: 7,
@@ -245,7 +268,156 @@ test("exportWorkerRecords rides out a transient 502 during export", async () => 
   });
   assert.equal(snapshot.revision, 7);
   assert.deepEqual(snapshot.records, []);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
+});
+
+test("record reads share one three-attempt budget across 5xx and invalid 2xx failures", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([
+    jsonResponse(502, { error: "exact_review_queue_unavailable" }),
+    jsonResponse(200, "null"),
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      revision: 7,
+      records: [],
+      nextCursor: null,
+    }),
+  ]);
+  const snapshot = await exportWorkerRecords({
+    baseUrl,
+    webhookSecret,
+    repoSlug: "openclaw-openclaw",
+    fetch: fetchImpl,
+  });
+  assert.equal(snapshot.revision, 7);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
+});
+
+test("record reads retry malformed endpoint envelopes, rows, and cursors", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      revision: 7,
+      records: [{}],
+      nextCursor: null,
+    }),
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      revision: 7,
+      records: [],
+      nextCursor: 0,
+    }),
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      revision: 7,
+      records: [],
+      nextCursor: null,
+    }),
+  ]);
+  const snapshot = await exportWorkerRecords({
+    baseUrl,
+    webhookSecret,
+    repoSlug: "openclaw-openclaw",
+    fetch: fetchImpl,
+  });
+  assert.equal(snapshot.revision, 7);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
+});
+
+test("record reads surface pre-fetch configuration errors without long retries", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([]);
+  await assert.rejects(
+    exportWorkerRecords({
+      baseUrl: "http://worker.example.test",
+      webhookSecret,
+      repoSlug: "openclaw-openclaw",
+      fetch: fetchImpl,
+    }),
+    /Worker record URL must use HTTPS/,
+  );
+  assert.equal(calls.length, 0);
+  assert.deepEqual(delays, []);
+});
+
+test("stored-snapshot reads remain fail-closed after the long retry budget", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([
+    jsonResponse(500, { error: "exact_review_queue_unavailable" }),
+    jsonResponse(500, { error: "exact_review_queue_unavailable" }),
+    jsonResponse(500, { error: "exact_review_queue_unavailable" }),
+  ]);
+  await assert.rejects(
+    fetchWorkerStoredSnapshot({
+      baseUrl,
+      webhookSecret,
+      repoSlug: "openclaw-openclaw",
+      fetch: fetchImpl,
+    }),
+    (error: Error & { status?: number; code?: string }) => {
+      assert.equal(error.name, "WorkerRecordRequestError");
+      assert.equal(error.status, 500);
+      assert.equal(error.code, "exact_review_queue_unavailable");
+      return true;
+    },
+  );
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
+});
+
+test("slug discovery retries malformed repository entries", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([
+    jsonResponse(200, { repositories: [{}] }),
+    jsonResponse(200, {
+      repositories: [{ repoSlug: "openclaw-openclaw", revision: 12 }],
+    }),
+  ]);
+  assert.deepEqual(
+    await discoverWorkerRecordRepoSlugs({ baseUrl, webhookSecret, fetch: fetchImpl }),
+    [{ repoSlug: "openclaw-openclaw", revision: 12 }],
+  );
   assert.equal(calls.length, 2);
+  assert.deepEqual(delays, [60_000]);
+});
+
+test("canonical item listing retries malformed rows and inconsistent cursors", async (t) => {
+  const delays = captureRetryDelays(t);
+  const { calls, fetchImpl } = fetchStub([
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      section: "items",
+      records: [{}],
+      nextCursor: null,
+    }),
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      section: "items",
+      records: [{ id: 1 }],
+      nextCursor: 2,
+    }),
+    jsonResponse(200, {
+      repoSlug: "openclaw-openclaw",
+      section: "items",
+      records: [{ id: 1 }],
+      nextCursor: null,
+    }),
+  ]);
+  assert.deepEqual(
+    await fetchWorkerCanonicalItemIds({
+      baseUrl,
+      webhookSecret,
+      repoSlug: "openclaw-openclaw",
+      fetch: fetchImpl,
+    }),
+    [1],
+  );
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [60_000, 180_000]);
 });
 
 test("fetchWorkerCanonicalItemIds pages the exact coverage identity set", async () => {
