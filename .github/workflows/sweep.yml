@@ -3680,12 +3680,12 @@ jobs:
           hydrate-state-blobs: "false"
 
       - uses: actions/setup-node@v6
-        if: ${{ github.event.schedule != '37 */6 * * *' }}
+        if: ${{ github.event.schedule == '41/10 * * * *' }}
         with:
           node-version: 24
 
       - name: Prepare canonical coverage identities
-        if: ${{ github.event.schedule != '37 */6 * * *' }}
+        if: ${{ github.event.schedule == '41/10 * * * *' }}
         env:
           CLAWSWEEPER_RECORDS_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
           CLAWSWEEPER_RECORDS_SECRET: ${{ secrets.CLAWSWEEPER_WEBHOOK_SECRET }}
